@@ -30,7 +30,7 @@ A `~/.dsh/profiles/web-auth/.gitignore` is created on first run to keep
 Add the bundle to the existing `web` profile:
 
 ```bash
-dsh plugin --profile web add @gitsang/dsh-web-auth
+dsh plugin --profile web add github:gitsang/dsh-web-auth
 ```
 
 Then start dsh web as usual:
@@ -50,13 +50,13 @@ http://127.0.0.1:3081
 
 All configuration is optional and read from environment variables at boot:
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `DSH_WEB_AUTH_HOST` | `127.0.0.1` | Auth proxy bind host |
-| `DSH_WEB_AUTH_PORT` | `3081` | Auth proxy listen port |
-| `DSH_WEB_AUTH_TTL_MS` | `86400000` | Rolling session expiry (24h) |
-| `DSH_WEB_AUTH_DATA_DIR` | `~/.dsh/profiles/web-auth` | Directory for `auth.json` and `session.json` |
-| `DSH_HOME` | `~/.dsh` | dsh home (used when `DSH_WEB_AUTH_DATA_DIR` is unset) |
+| Variable                | Default                    | Meaning                                               |
+| ----------------------- | -------------------------- | ----------------------------------------------------- |
+| `DSH_WEB_AUTH_HOST`     | `127.0.0.1`                | Auth proxy bind host                                  |
+| `DSH_WEB_AUTH_PORT`     | `3081`                     | Auth proxy listen port                                |
+| `DSH_WEB_AUTH_TTL_MS`   | `86400000`                 | Rolling session expiry (24h)                          |
+| `DSH_WEB_AUTH_DATA_DIR` | `~/.dsh/profiles/web-auth` | Directory for `auth.json` and `session.json`          |
+| `DSH_HOME`              | `~/.dsh`                   | dsh home (used when `DSH_WEB_AUTH_DATA_DIR` is unset) |
 
 ### Exposing through the auth proxy
 

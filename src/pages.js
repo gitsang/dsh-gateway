@@ -31,6 +31,139 @@ export function readFormBody(req, limit = 64 * 1024) {
   })
 }
 
+// Mirrors the dsh web design tokens (@deepseek-ai/dsh-client-ui-theme).
+// The standalone gate page cannot read the web settings store, so it follows
+// the system color scheme; that is also the web UI's default theme preference.
+const LOGIN_THEME_CSS = `
+  :root {
+    color-scheme: light dark;
+    --dsw-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+      'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    --dsw-alias-bg-base: #ffffff;
+    --dsw-alias-bg-layer-1: #ffffff;
+    --dsw-alias-border-l2: rgba(0, 0, 0, 0.10);
+    --dsw-alias-brand-primary: #0f1115;
+    --dsw-alias-label-primary: #0f1115;
+    --dsw-alias-label-primary-foreground: #ffffff;
+    --dsw-alias-label-secondary: #61666b;
+    --dsw-alias-label-tertiary: #81858c;
+    --dsw-alias-label-dimmed: #e1e5ee;
+    --dsw-alias-button-primary-fill: #0f1115;
+    --dsw-alias-button-primary-hover: #43454a;
+    --dsw-alias-state-error-primary: #ec1313;
+    --dsw-specific-login-input: #f9fafb;
+    --dsw-shadow-lv3: 0 0 1px 0 rgba(0, 0, 0, 0.20), 0 0 4px 0 rgba(0, 0, 0, 0.02), 0 12px 32px 0 rgba(0, 0, 0, 0.08);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --dsw-alias-bg-base: #151517;
+      --dsw-alias-bg-layer-1: #232325;
+      --dsw-alias-border-l2: rgba(255, 255, 255, 0.12);
+      --dsw-alias-brand-primary: #f9fafb;
+      --dsw-alias-label-primary: #f9fafb;
+      --dsw-alias-label-primary-foreground: #0f1115;
+      --dsw-alias-label-secondary: #cfd3d6;
+      --dsw-alias-label-tertiary: #adb2b8;
+      --dsw-alias-label-dimmed: #43454a;
+      --dsw-alias-button-primary-fill: #f9fafb;
+      --dsw-alias-button-primary-hover: #ebeef2;
+      --dsw-alias-state-error-primary: #f25a5a;
+      --dsw-specific-login-input: #1b1b1c;
+    }
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    font-family: var(--dsw-font-family);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background: var(--dsw-alias-bg-base);
+    color: var(--dsw-alias-label-primary);
+  }
+
+  main {
+    width: min(22rem, calc(100vw - 2rem));
+    background: var(--dsw-alias-bg-layer-1);
+    border: 1px solid var(--dsw-alias-border-l2);
+    border-radius: 16px;
+    padding: 2rem;
+    box-shadow: var(--dsw-shadow-lv3);
+  }
+
+  h1 {
+    margin: 0 0 0.5rem;
+    font-size: 20px;
+    line-height: 28px;
+    font-weight: 500;
+  }
+
+  p.sub {
+    margin: 0 0 1.5rem;
+    color: var(--dsw-alias-label-tertiary);
+    font-size: 14px;
+    line-height: 22px;
+  }
+
+  label {
+    display: block;
+    margin: 0 0 0.375rem;
+    font-size: 14px;
+    line-height: 22px;
+    color: var(--dsw-alias-label-secondary);
+  }
+
+  input {
+    width: 100%;
+    box-sizing: border-box;
+    margin-bottom: 1rem;
+    padding: 8px 12px;
+    border: 1px solid var(--dsw-alias-border-l2);
+    border-radius: 8px;
+    background: var(--dsw-specific-login-input);
+    color: var(--dsw-alias-label-primary);
+    font: inherit;
+    font-size: 14px;
+    line-height: 22px;
+  }
+
+  input:focus {
+    outline: none;
+    border-color: var(--dsw-alias-brand-primary);
+  }
+
+  input::placeholder {
+    color: var(--dsw-alias-label-dimmed);
+  }
+
+  button {
+    width: 100%;
+    height: 36px;
+    border: 0;
+    border-radius: 18px;
+    background: var(--dsw-alias-button-primary-fill);
+    color: var(--dsw-alias-label-primary-foreground);
+    font: inherit;
+    font-size: 14px;
+    line-height: 22px;
+    cursor: pointer;
+  }
+
+  button:hover:not(:disabled) {
+    background: var(--dsw-alias-button-primary-hover);
+  }
+
+  .error {
+    color: var(--dsw-alias-state-error-primary);
+    font-size: 14px;
+    line-height: 22px;
+    margin: 0 0 1rem;
+  }
+`
+
 /** Render the single setup/login page. */
 export function renderLoginPage({ setup, error, next }) {
   const title = setup ? '设置密码' : '登录'
@@ -53,52 +186,7 @@ export function renderLoginPage({ setup, error, next }) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)} · dsh web auth</title>
-<style>
-  :root { color-scheme: light dark; }
-  body {
-    margin: 0;
-    min-height: 100vh;
-    display: grid;
-    place-items: center;
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-    background: #111;
-    color: #eee;
-  }
-  main {
-    width: min(22rem, calc(100vw - 2rem));
-    background: #181818;
-    border: 1px solid #2c2c2c;
-    border-radius: 12px;
-    padding: 2rem;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, .35);
-  }
-  h1 { margin: 0 0 .5rem; font-size: 1.25rem; }
-  p.sub { margin: 0 0 1.5rem; color: #aaa; font-size: .875rem; }
-  label { display: block; margin: 0 0 .375rem; font-size: .875rem; color: #ccc; }
-  input {
-    width: 100%;
-    box-sizing: border-box;
-    margin-bottom: 1rem;
-    padding: .625rem .75rem;
-    border: 1px solid #333;
-    border-radius: 8px;
-    background: #0f0f0f;
-    color: #eee;
-    font: inherit;
-  }
-  button {
-    width: 100%;
-    padding: .625rem .75rem;
-    border: 0;
-    border-radius: 8px;
-    background: #4f8cff;
-    color: white;
-    font: inherit;
-    cursor: pointer;
-  }
-  button:hover { background: #3d7bf0; }
-  .error { color: #ff7b7b; font-size: .875rem; margin: 0 0 1rem; }
-</style>
+<style>${LOGIN_THEME_CSS}</style>
 </head>
 <body>
 <main>

@@ -1,0 +1,10 @@
+# dsh-web-auth bundle patch.
+#
+# Adds one row after the web-app bundle's layers: an auth reverse proxy that
+# starts beside the dsh web server, gates every request through the password /
+# session-token flow, and then proxies authenticated traffic straight back to
+# the untouched web server bound by the `webserver` row.
+- insert:
+    - id: web-auth
+      name: '@gitsang/dsh-web-auth'
+      inject: [webServer]

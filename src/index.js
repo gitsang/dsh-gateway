@@ -7,7 +7,7 @@ import z from '@deepseek-ai/schemastery'
 import { AuthStore, SessionStore } from './stores.js'
 import { parseCookies, proxyRequest, proxyUpgrade } from './proxy.js'
 import { readFormBody, renderLoginPage, safeNext } from './pages.js'
-import { ICON_192_PNG, ICON_512_PNG, MANIFEST, SW_JS } from './pwa.js'
+import { ICON_SVG, MANIFEST, SW_JS } from './pwa.js'
 
 export const name = 'web-auth'
 export const inject = ['webServer']
@@ -172,21 +172,12 @@ class WebAuthProxy extends Service {
         return
       }
 
-      if (pathname === '/icon-192.png') {
+      if (pathname === '/favicon.svg') {
         res.writeHead(200, {
-          'content-type': 'image/png',
-          'cache-control': 'public, max-age=86400'
+          'content-type': 'image/svg+xml; charset=utf-8',
+          'cache-control': 'no-cache'
         })
-        res.end(ICON_192_PNG)
-        return
-      }
-
-      if (pathname === '/icon-512.png') {
-        res.writeHead(200, {
-          'content-type': 'image/png',
-          'cache-control': 'public, max-age=86400'
-        })
-        res.end(ICON_512_PNG)
+        res.end(ICON_SVG)
         return
       }
     }

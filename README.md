@@ -22,9 +22,10 @@ once on first use, and only then proxies requests through to the web server.
 - Once authenticated, requests are proxied straight back to the dsh web server
   listening on its original port.
 - By default the proxy also serves PWA assets (`/manifest.webmanifest`,
-  `/sw.js`, `/icon-192.png`, `/icon-512.png`) and injects the manifest link
-  plus a pass-through service-worker registration into HTML pages. This makes
-  the proxy origin installable as a standalone web app on `localhost`/HTTPS.
+  `/sw.js`, `/favicon.svg`) and injects the manifest link plus a pass-through
+  service-worker registration into HTML pages. The manifest references the
+  SVG icon only. This makes the proxy origin installable as a standalone web
+  app on `localhost`/HTTPS.
 
 A `~/.dsh/profiles/web-auth/.gitignore` is created on first run to keep
 `auth.json` and `session.json` out of git.
@@ -66,8 +67,8 @@ All configuration is optional and read from environment variables at boot:
 ### PWA (installable web app)
 
 PWA injection is enabled by default. The proxy serves the manifest, service
-worker and icons itself, and injects the required tags into the login page and
-proxied HTML responses. Set `DSH_WEB_AUTH_PWA=0` to disable it.
+worker and `/favicon.svg` itself, and injects the required tags into the login
+page and proxied HTML responses. Set `DSH_WEB_AUTH_PWA=0` to disable it.
 
 Browser install prompts require a secure context. `http://127.0.0.1:3081` and
 `http://localhost:3081` qualify; an exposed `http://192.168.x.x:3081` LAN URL

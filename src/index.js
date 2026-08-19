@@ -7,6 +7,7 @@ import z from '@deepseek-ai/schemastery'
 import { AuthStore, SessionStore } from './stores.js'
 import { parseCookies, proxyRequest, proxyUpgrade } from './proxy.js'
 import { readFormBody, renderLoginPage, safeNext } from './pages.js'
+import { ICON_192_PNG, ICON_512_PNG, MANIFEST, SW_JS } from './pwa.js'
 
 export const name = 'web-auth'
 export const inject = ['webServer']
@@ -27,6 +28,12 @@ function envInt(name, fallback) {
   return Number.isInteger(value) && value >= 0 ? value : fallback
 }
 
+function envBool(name, fallback) {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return fallback
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on'
+}
+
 function defaultDataDir() {
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   return join(dshHome, 'profiles', 'web-auth')
@@ -36,7 +43,8 @@ export const Config = z.object({
   host: z.string().default(envString('DSH_WEB_AUTH_HOST', '127.0.0.1')),
   port: z.natural().max(65535).default(envInt('DSH_WEB_AUTH_PORT', DEFAULT_PORT)),
   ttlMs: z.natural().min(1).default(envInt('DSH_WEB_AUTH_TTL_MS', DEFAULT_TTL_MS)),
-  dataDir: z.string().default(envString('DSH_WEB_AUTH_DATA_DIR', defaultDataDir()))
+  dataDir: z.string().default(envString('DSH_WEB_AUTH_DATA_DIR', defaultDataDir())),
+  pwa: z.boolean().default(envBool('DSH_WEB_AUTH_PWA', true))
 })
 
 function upstreamTarget(webServer) {
@@ -145,6 +153,44 @@ class WebAuthProxy extends Service {
       return
     }
 
+    if (this.config.pwa) {
+      if (pathname === '/manifest.webmanifest') {
+        res.writeHead(200, {
+          'content-type': 'application/manifest+json; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        res.end(JSON.stringify(MANIFEST))
+        return
+      }
+
+      if (pathname === '/sw.js') {
+        res.writeHead(200, {
+          'content-type': 'text/javascript; charset=utf-8',
+          'cache-control': 'no-cache'
+        })
+        res.end(SW_JS)
+        return
+      }
+
+      if (pathname === '/icon-192.png') {
+        res.writeHead(200, {
+          'content-type': 'image/png',
+          'cache-control': 'public, max-age=86400'
+        })
+        res.end(ICON_192_PNG)
+        return
+      }
+
+      if (pathname === '/icon-512.png') {
+        res.writeHead(200, {
+          'content-type': 'image/png',
+          'cache-control': 'public, max-age=86400'
+        })
+        res.end(ICON_512_PNG)
+        return
+      }
+    }
+
     // If auth.json was deleted (forgot-password reset), never fall through on
     // a leftover session cookie: force the setup flow again.
     if (!this.auth.hasPassword()) {
@@ -155,7 +201,7 @@ class WebAuthProxy extends Service {
     const session = this.getSession(req)
     if (session !== undefined) {
       this.sessions.touch(session.token)
-      proxyRequest(req, res, target)
+      proxyRequest(req, res, target, { pwa: this.config.pwa })
       return
     }
 
@@ -184,7 +230,8 @@ class WebAuthProxy extends Service {
     const html = renderLoginPage({
       setup,
       next,
-      error: options.error
+      error: options.error,
+      pwa: this.config.pwa
     })
     res.writeHead(options.status ?? 200, {
       'content-type': 'text/html; charset=utf-8',

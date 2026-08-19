@@ -1,4 +1,5 @@
 import { request as httpRequest } from 'node:http'
+import { injectPwaTags } from './pwa.js'
 
 /**
  * Parse a Cookie request header into a plain object. Only the first `name=`
@@ -38,8 +39,15 @@ function filterHopByHop(headers) {
   return out
 }
 
-/** Forward one HTTP request to the dsh web server and pipe the response back. */
-export function proxyRequest(req, res, target) {
+/**
+ * Forward one HTTP request to the dsh web server and pipe the response back.
+ *
+ * When `options.pwa` is true (the default) and the upstream response is
+ * uncompressed HTML, the PWA tags are injected into the head before the
+ * response is sent back. Everything else is streamed through untouched.
+ */
+export function proxyRequest(req, res, target, options = {}) {
+  const { pwa = true } = options
   const upstream = httpRequest({
     hostname: target.host,
     port: target.port,
@@ -47,7 +55,41 @@ export function proxyRequest(req, res, target) {
     method: req.method,
     headers: filterHopByHop(req.headers)
   }, (upstreamRes) => {
-    res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.statusMessage, upstreamRes.headers)
+    const statusCode = upstreamRes.statusCode ?? 502
+    const contentType = String(upstreamRes.headers['content-type'] ?? '')
+    const canInject = pwa &&
+      req.method === 'GET' &&
+      statusCode === 200 &&
+      contentType.includes('text/html') &&
+      !upstreamRes.headers['content-encoding']
+
+    if (canInject) {
+      const chunks = []
+      upstreamRes.on('data', (chunk) => chunks.push(chunk))
+      upstreamRes.on('end', () => {
+        const headers = { ...upstreamRes.headers }
+        delete headers['transfer-encoding']
+        const body = injectPwaTags(Buffer.concat(chunks).toString('utf8'))
+        headers['content-length'] = Buffer.byteLength(body)
+        res.writeHead(statusCode, upstreamRes.statusMessage, headers)
+        res.end(body)
+      })
+      upstreamRes.on('error', (err) => {
+        if (!res.headersSent) {
+          res.writeHead(502, {
+            'content-type': 'text/plain; charset=utf-8',
+            'cache-control': 'no-store',
+            connection: 'close'
+          })
+          res.end(`dsh-web-auth: upstream response error: ${err.message}`)
+          return
+        }
+        res.destroy()
+      })
+      return
+    }
+
+    res.writeHead(statusCode, upstreamRes.statusMessage, upstreamRes.headers)
     upstreamRes.pipe(res)
   })
 

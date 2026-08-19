@@ -1,3 +1,5 @@
+import { PWA_HEAD_TAGS } from './pwa.js'
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -165,7 +167,7 @@ const LOGIN_THEME_CSS = `
 `
 
 /** Render the single setup/login page. */
-export function renderLoginPage({ setup, error, next }) {
+export function renderLoginPage({ setup, error, next, pwa }) {
   const title = setup ? '设置密码' : '登录'
   const errorHtml = error
     ? `<p class="error" role="alert">${escapeHtml(error)}</p>`
@@ -186,6 +188,7 @@ export function renderLoginPage({ setup, error, next }) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)} · dsh web auth</title>
+${pwa === false ? '' : PWA_HEAD_TAGS}
 <style>${LOGIN_THEME_CSS}</style>
 </head>
 <body>

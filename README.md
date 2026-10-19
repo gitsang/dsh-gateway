@@ -21,6 +21,17 @@ once on first use, and only then proxies requests through to the web server.
   (rolling expiry).
 - Once authenticated, requests are proxied straight back to the dsh web server
   listening on its original port.
+- The proxy also satisfies dsh's **own** browser-session gate, so the password
+  page is the only login you see. dsh protects every `/api` call and WebSocket
+  stream with a signed cookie whose name and payload are bound to the request
+  authority (host + port), and it only hands that cookie out by redeeming a
+  per-process launch token on `GET /`. That token is printed on dsh's own port,
+  so redeeming it there mints a cookie for `host:3080` that is useless on the
+  proxy's `host:3081`: the password gate passes, then dsh answers
+  `401 dsh web authentication required`. The proxy therefore redeems the token
+  itself, per authority, and forwards the cookie dsh expects (dropping any
+  `dsh-auth-*` cookie the browser holds). An expired cookie is refreshed and the
+  request retried once, so a dsh restart does not bounce you back to 401.
 - By default the proxy also serves PWA assets (`/manifest.webmanifest`,
   `/sw.js`, `/favicon.svg`) and injects the manifest link plus a pass-through
   service-worker registration into HTML pages. The manifest references the
@@ -45,7 +56,8 @@ dsh web
 ```
 
 The dsh web server still listens on `127.0.0.1:3080`; the auth proxy listens
-on `127.0.0.1:3081` by default. Open:
+on the dsh web port plus one (`127.0.0.1:3081` for the default dsh web port).
+Open:
 
 ```bash
 http://127.0.0.1:3081
@@ -58,7 +70,7 @@ All configuration is optional and read from environment variables at boot:
 | Variable                | Default                    | Meaning                                               |
 | ----------------------- | -------------------------- | ----------------------------------------------------- |
 | `DSH_WEB_AUTH_HOST`     | `127.0.0.1`                | Auth proxy bind host                                  |
-| `DSH_WEB_AUTH_PORT`     | `3081`                     | Auth proxy listen port                                |
+| `DSH_WEB_AUTH_PORT`     | `dsh web port + 1`         | Auth proxy listen port (overrides the default)        |
 | `DSH_WEB_AUTH_TTL_MS`   | `86400000`                 | Rolling session expiry (24h)                          |
 | `DSH_WEB_AUTH_DATA_DIR` | `~/.dsh/profiles/web-auth` | Directory for `auth.json` and `session.json`          |
 | `DSH_WEB_AUTH_PWA`      | `1`                        | Serve PWA assets and inject PWA tags into HTML        |

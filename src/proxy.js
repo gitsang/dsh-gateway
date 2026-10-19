@@ -40,81 +40,216 @@ function filterHopByHop(headers) {
 }
 
 /**
+ * The cookie prefix dsh uses for its signed browser-session cookies
+ * (`dsh-auth-<base64url sha256 of the request authority>`).
+ */
+export const DSH_COOKIE_PREFIX = 'dsh-auth-'
+
+/**
+ * Return a copy of `headers` whose Cookie header holds only cookies that are
+ * safe to forward, plus `sessionCookie` when one was supplied.
+ *
+ * Every `dsh-auth-*` cookie the browser holds is dropped: its name encodes the
+ * authority that minted it, which is generally *not* the authority we forward
+ * on, so relaying it can only lead dsh to reject the request.
+ */
+function replaceSessionCookie(headers, sessionCookie) {
+  const out = { ...headers }
+  const raw = out.cookie
+  const kept = typeof raw === 'string'
+    ? raw.split(';')
+      .map((segment) => segment.trim())
+      .filter((segment) => segment !== '' && !segment.startsWith(DSH_COOKIE_PREFIX))
+    : []
+  if (sessionCookie !== undefined) kept.push(sessionCookie)
+  if (kept.length === 0) delete out.cookie
+  else out.cookie = kept.join('; ')
+  return out
+}
+
+/**
+ * Whether a response is dsh's browser-session rejection rather than some other
+ * 401. dsh answers a missing/expired cookie with a fixed plain-text body; only
+ * that reply is worth re-authenticating for.
+ */
+function isDshAuthRejection(upstreamRes, body) {
+  return upstreamRes.statusCode === 401 &&
+    String(upstreamRes.headers['content-type'] ?? '').includes('text/plain') &&
+    body.includes('dsh web authentication required')
+}
+
+/** Bodies larger than this are streamed rather than buffered for a retry. */
+const BUFFER_LIMIT_BYTES = 1 << 20
+
+/**
+ * Read a whole request body into memory. Returns undefined when the body
+ * exceeds `limit` (the caller then streams the request instead of retrying it).
+ */
+function bufferRequest(req, limit) {
+  return new Promise((resolve) => {
+    const chunks = []
+    let size = 0
+    let overflowed = false
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) overflowed = true
+      else chunks.push(chunk)
+    })
+    req.on('end', () => resolve(overflowed ? undefined : Buffer.concat(chunks)))
+    req.on('error', () => resolve(undefined))
+  })
+}
+
+/** A request method that carries no body. */
+function hasNoBody(method) {
+  return method === 'GET' || method === 'HEAD'
+}
+
+/**
+ * Write one upstream response to the client, injecting PWA tags into plain
+ * uncompressed HTML when enabled. Everything else streams through untouched.
+ */
+function relay(upstreamRes, res, options) {
+  const { pwa = true, method } = options
+  const statusCode = upstreamRes.statusCode ?? 502
+  const contentType = String(upstreamRes.headers['content-type'] ?? '')
+  const canInject = pwa &&
+    method === 'GET' &&
+    statusCode === 200 &&
+    contentType.includes('text/html') &&
+    !upstreamRes.headers['content-encoding']
+
+  if (!canInject) {
+    res.writeHead(statusCode, upstreamRes.statusMessage, upstreamRes.headers)
+    upstreamRes.pipe(res)
+    return
+  }
+
+  const chunks = []
+  upstreamRes.on('data', (chunk) => chunks.push(chunk))
+  upstreamRes.on('end', () => {
+    const headers = { ...upstreamRes.headers }
+    delete headers['transfer-encoding']
+    const body = injectPwaTags(Buffer.concat(chunks).toString('utf8'))
+    headers['content-length'] = Buffer.byteLength(body)
+    res.writeHead(statusCode, upstreamRes.statusMessage, headers)
+    res.end(body)
+  })
+  upstreamRes.on('error', (err) => {
+    if (!res.headersSent) {
+      res.writeHead(502, {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        connection: 'close'
+      })
+      res.end(`dsh-web-auth: upstream response error: ${err.message}`)
+      return
+    }
+    res.destroy()
+  })
+}
+
+/** Issue one request to dsh; resolves with its response or rejects. */
+function send(target, req, options, body) {
+  return new Promise((resolve, reject) => {
+    const headers = replaceSessionCookie(filterHopByHop(req.headers), options.sessionCookie)
+    if (body !== undefined) headers['content-length'] = String(body.length)
+    const upstream = httpRequest({
+      hostname: target.host,
+      port: target.port,
+      path: req.url,
+      method: req.method,
+      headers
+    }, resolve)
+    upstream.on('error', reject)
+    if (body === undefined) req.pipe(upstream)
+    else upstream.end(body)
+  })
+}
+
+/** Report an upstream connection failure to the client. */
+function fail(res, message) {
+  if (res.headersSent) {
+    res.destroy()
+    return
+  }
+  res.writeHead(502, {
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'close'
+  })
+  res.end(`dsh-web-auth: upstream unavailable: ${message}`)
+}
+
+/**
  * Forward one HTTP request to the dsh web server and pipe the response back.
  *
  * When `options.pwa` is true (the default) and the upstream response is
  * uncompressed HTML, the PWA tags are injected into the head before the
  * response is sent back. Everything else is streamed through untouched.
+ *
+ * `options.sessionCookie` is the `dsh-auth-…` pair the proxy redeemed for this
+ * request's authority; it replaces whatever session cookie the browser sent.
+ * `options.reauthorize` returns a replacement pair when dsh rejects that cookie
+ * (it expired, or dsh restarted with a new launch token), letting the proxy
+ * retry once instead of handing the user a 401 they cannot act on. It may
+ * return a promise.
  */
-export function proxyRequest(req, res, target, options = {}) {
-  const { pwa = true } = options
-  const upstream = httpRequest({
-    hostname: target.host,
-    port: target.port,
-    path: req.url,
-    method: req.method,
-    headers: filterHopByHop(req.headers)
-  }, (upstreamRes) => {
-    const statusCode = upstreamRes.statusCode ?? 502
-    const contentType = String(upstreamRes.headers['content-type'] ?? '')
-    const canInject = pwa &&
-      req.method === 'GET' &&
-      statusCode === 200 &&
-      contentType.includes('text/html') &&
-      !upstreamRes.headers['content-encoding']
+export async function proxyRequest(req, res, target, options = {}) {
+  const body = hasNoBody(req.method) ? undefined : await bufferRequest(req, BUFFER_LIMIT_BYTES)
+  // A streamed (unbuffered) body cannot be replayed, so it gets no retry.
+  let canRetry = body !== undefined && options.reauthorize !== undefined
 
-    if (canInject) {
+  let sessionCookie = options.sessionCookie
+  for (;;) {
+    let upstreamRes
+    try {
+      upstreamRes = await send(target, req, { ...options, sessionCookie }, body)
+    } catch (error) {
+      fail(res, error?.message ?? error)
+      return
+    }
+
+    if (canRetry && upstreamRes.statusCode === 401) {
+      // Buffer only the small rejection reply; a real 401 payload is tiny.
       const chunks = []
-      upstreamRes.on('data', (chunk) => chunks.push(chunk))
-      upstreamRes.on('end', () => {
-        const headers = { ...upstreamRes.headers }
-        delete headers['transfer-encoding']
-        const body = injectPwaTags(Buffer.concat(chunks).toString('utf8'))
-        headers['content-length'] = Buffer.byteLength(body)
-        res.writeHead(statusCode, upstreamRes.statusMessage, headers)
-        res.end(body)
+      let size = 0
+      await new Promise((resolve) => {
+        upstreamRes.on('data', (chunk) => {
+          size += chunk.length
+          if (size <= 8192) chunks.push(chunk)
+        })
+        upstreamRes.once('end', resolve)
+        upstreamRes.once('error', resolve)
       })
-      upstreamRes.on('error', (err) => {
-        if (!res.headersSent) {
-          res.writeHead(502, {
-            'content-type': 'text/plain; charset=utf-8',
-            'cache-control': 'no-store',
-            connection: 'close'
-          })
-          res.end(`dsh-web-auth: upstream response error: ${err.message}`)
-          return
-        }
-        res.destroy()
-      })
+      if (isDshAuthRejection(upstreamRes, Buffer.concat(chunks).toString('utf8'))) {
+        canRetry = false
+        sessionCookie = await options.reauthorize()
+        continue
+      }
+      // Some other 401: replay the buffered reply to the client verbatim.
+      const headers = { ...upstreamRes.headers }
+      delete headers['transfer-encoding']
+      headers['content-length'] = String(Buffer.concat(chunks).length)
+      res.writeHead(401, upstreamRes.statusMessage, headers)
+      res.end(Buffer.concat(chunks))
       return
     }
 
-    res.writeHead(statusCode, upstreamRes.statusMessage, upstreamRes.headers)
-    upstreamRes.pipe(res)
-  })
-
-  upstream.on('error', (err) => {
-    if (res.headersSent) {
-      res.destroy()
-      return
-    }
-    res.writeHead(502, {
-      'content-type': 'text/plain; charset=utf-8',
-      'cache-control': 'no-store',
-      connection: 'close'
-    })
-    res.end(`dsh-web-auth: upstream unavailable: ${err.message}`)
-  })
-
-  req.pipe(upstream)
+    relay(upstreamRes, res, { ...options, sessionCookie })
+    return
+  }
 }
 
 /**
  * Forward a WebSocket upgrade to the dsh web server. The caller has already
  * checked the session token; this only pipes bytes after that gate.
  */
-export function proxyUpgrade(req, socket, head, target) {
-  const headers = { ...req.headers }
+export function proxyUpgrade(req, socket, head, target, options = {}) {
+  // Keep Upgrade/Connection: they are what makes this an upgrade rather than an
+  // ordinary GET. Only the browser's dsh session cookie is replaced with the
+  // one redeemed for this authority.
+  const headers = replaceSessionCookie(req.headers, options.sessionCookie)
   delete headers['proxy-authorization']
   delete headers['proxy-authenticate']
 

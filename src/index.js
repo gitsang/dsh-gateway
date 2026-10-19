@@ -6,14 +6,16 @@ import { Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { AuthStore, SessionStore } from './stores.js'
 import { parseCookies, proxyRequest, proxyUpgrade } from './proxy.js'
+import { UpstreamAuth } from './upstream-auth.js'
 import { readFormBody, renderLoginPage, safeNext } from './pages.js'
 import { ICON_SVG, MANIFEST, SW_JS } from './pwa.js'
 
 export const name = 'web-auth'
+// `connection` is optional: the auth gate must still boot when a composition
+// omits the browser transport, it just cannot redeem a dsh session then.
 export const inject = ['webServer']
 
 export const COOKIE_NAME = 'dsh_web_session'
-const DEFAULT_PORT = 3081
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 
 function envString(name, fallback) {
@@ -41,7 +43,9 @@ function defaultDataDir() {
 
 export const Config = z.object({
   host: z.string().default(envString('DSH_WEB_AUTH_HOST', '127.0.0.1')),
-  port: z.natural().max(65535).default(envInt('DSH_WEB_AUTH_PORT', DEFAULT_PORT)),
+  // The default port is derived from the dsh web port at startup; this env
+  // var only overrides it when explicitly set.
+  port: z.natural().max(65535).default(envInt('DSH_WEB_AUTH_PORT')),
   ttlMs: z.natural().min(1).default(envInt('DSH_WEB_AUTH_TTL_MS', DEFAULT_TTL_MS)),
   dataDir: z.string().default(envString('DSH_WEB_AUTH_DATA_DIR', defaultDataDir())),
   pwa: z.boolean().default(envBool('DSH_WEB_AUTH_PWA', true))
@@ -61,6 +65,20 @@ function lanAddresses() {
     .map((iface) => iface.address)
 }
 
+/**
+ * The authority the browser used, as dsh will canonicalize it: lowercased host
+ * with the default port stripped, IPv6 bracketed.
+ */
+function requestAuthority(req) {
+  const host = req.headers.host
+  if (typeof host !== 'string' || host === '') return undefined
+  try {
+    return new URL(`http://${host}`).host
+  } catch {
+    return undefined
+  }
+}
+
 class WebAuthProxy extends Service {
   static Config = Config
 
@@ -72,6 +90,7 @@ class WebAuthProxy extends Service {
     this.server = null
     this.proxyPort = null
     this.sockets = new Set()
+    this.upstreamAuth = null
   }
 
   async [Service.init]() {
@@ -79,6 +98,19 @@ class WebAuthProxy extends Service {
     await this.sessions.init()
 
     const target = upstreamTarget(this.ctx.webServer)
+    // dsh mints its browser-session cookie for the authority a request arrives
+    // on, and only hands that cookie out through a per-process launch token on
+    // `GET /`. The proxy is the browser's only origin, so it redeems the token
+    // itself for each authority it serves and forwards the resulting cookie.
+    this.upstreamAuth = new UpstreamAuth(
+      target,
+      () => this.tokenizedUrl.bind(this),
+      this.ctx.logger
+    )
+    // The auth proxy listens next to dsh web by default (web port + 1).
+    // DSH_WEB_AUTH_PORT can still override this.
+    this.config = { ...this.config, port: this.config.port ?? Number(target.port) + 1 }
+    const listenPort = this.config.port
     this.server = createServer((req, res) => {
       this.handle(req, res, target).catch((err) => {
         this.ctx.logger.error(err)
@@ -99,7 +131,10 @@ class WebAuthProxy extends Service {
     this.server.on('upgrade', (req, socket, head) => {
       this.sockets.add(socket)
       socket.on('close', () => this.sockets.delete(socket))
-      this.handleUpgrade(req, socket, head, target)
+      this.handleUpgrade(req, socket, head, target).catch((err) => {
+        this.ctx.logger.error(err)
+        socket.destroy()
+      })
     })
 
     await new Promise((resolve, reject) => {
@@ -111,16 +146,30 @@ class WebAuthProxy extends Service {
         this.server.off('error', onError)
         this.server.on('error', (err) => this.ctx.logger.error(err))
         const address = this.server.address()
-        this.proxyPort = typeof address === 'object' && address !== null ? address.port : this.config.port
+        this.proxyPort = typeof address === 'object' && address !== null ? address.port : listenPort
         resolve()
       }
       this.server.once('error', onError)
       this.server.once('listening', onListening)
-      this.server.listen(this.config.port, this.config.host)
+      this.server.listen(listenPort, this.config.host)
     })
 
     this.ctx.effect(() => async () => this.close(), 'web-auth.proxy')
     this.printUrl(target)
+  }
+
+  /**
+   * A tokenized application URL for `authority`, from dsh's Connection service.
+   *
+   * dsh builds this URL from its own loopback address; we only need the token it
+   * embeds, so the authority is swapped for the one the browser is using. When
+   * Connection is absent the gate still works for the password layer, but dsh
+   * itself will answer 401 — exactly as it did before this custodian existed.
+   */
+  tokenizedUrl(authority) {
+    const connection = this.ctx.get('connection')
+    if (connection === undefined) return undefined
+    return connection.authenticatedUrl(`http://${authority}/`)
   }
 
   getSession(req) {
@@ -192,11 +241,31 @@ class WebAuthProxy extends Service {
     const session = this.getSession(req)
     if (session !== undefined) {
       this.sessions.touch(session.token)
-      proxyRequest(req, res, target, { pwa: this.config.pwa })
+      const authority = requestAuthority(req)
+      const cookie = authority === undefined ? undefined : await this.upstreamAuth.cookieFor(authority)
+      await proxyRequest(req, res, target, {
+        pwa: this.config.pwa,
+        sessionCookie: cookie,
+        // dsh rejected the cookie we cached (expired, or it restarted with a
+        // new launch token). Redeem a fresh one and let the proxy retry.
+        reauthorize: authority === undefined
+          ? undefined
+          : () => this.reauthorize(authority)
+      })
       return
     }
 
     this.deny(req, res)
+  }
+
+  /**
+   * Replace a rejected cookie: drop the stale entry and redeem a fresh one for
+   * the same authority. `refresh` coalesces concurrent callers, so a page load
+   * whose requests all trip the stale cookie performs one token exchange.
+   */
+  async reauthorize(authority) {
+    this.upstreamAuth.forget(authority)
+    return this.upstreamAuth.refresh(authority)
   }
 
   deny(req, res) {
@@ -285,7 +354,7 @@ class WebAuthProxy extends Service {
     res.end()
   }
 
-  handleUpgrade(req, socket, head, target) {
+  async handleUpgrade(req, socket, head, target) {
     const session = this.getSession(req)
     if (session === undefined) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 12\r\n\r\nunauthorized')
@@ -293,7 +362,9 @@ class WebAuthProxy extends Service {
       return
     }
     this.sessions.touch(session.token)
-    proxyUpgrade(req, socket, head, target)
+    const authority = requestAuthority(req)
+    const cookie = authority === undefined ? undefined : await this.upstreamAuth.cookieFor(authority)
+    proxyUpgrade(req, socket, head, target, { sessionCookie: cookie })
   }
 
   printUrl(target) {

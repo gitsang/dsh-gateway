@@ -4,3 +4,7 @@ node_modules/
 
 auth.json
 session.json
+
+# dsh writes this profile-root file into any directory it boots as a profile;
+# this repo doubles as ~/.dsh/profiles/web-auth, so it appears here.
+cordis.yml

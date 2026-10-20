@@ -7,6 +7,8 @@ The dsh web server itself is left untouched. This bundle adds one row to the
 `web` profile: an auth proxy that starts beside `dsh web`, asks for a password
 once on first use, and only then proxies requests through to the web server.
 
+![dsh-web-auth login page](docs/login-page.png)
+
 ## How it works
 
 - First visit: no password is stored yet, so `/login` shows the **set

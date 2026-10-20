@@ -1,4 +1,5 @@
 import { request as httpRequest } from 'node:http'
+import { targetAuthority } from './proxy.js'
 
 /**
  * Server-side custodian of dsh's browser-session cookie.
@@ -12,13 +13,13 @@ import { request as httpRequest } from 'node:http'
  * user makes to `host:3081` carries no cookie dsh will accept: `401 dsh web
  * authentication required`, even though the password gate already passed.
  *
- * The fix is to make the proxy a client of dsh in its own right: for each
- * authority a browser reaches us on, ask dsh for a fresh tokenized URL, redeem
- * it exactly as a browser would, and keep the resulting cookie. Every proxied
- * request and WebSocket upgrade then carries a cookie dsh considers valid for
- * the authority we forward — so the password gate is the only gate the user
- * interacts with, and the launch token never has to round-trip through the
- * address bar.
+ * The fix is to make the proxy a client of dsh in its own right: ask dsh for
+ * a fresh tokenized URL, redeem it exactly as a browser would, and keep the
+ * resulting cookie. The proxy forwards every request under dsh's loopback
+ * authority, so it mints the cookie for that same authority. Every proxied
+ * request and WebSocket upgrade then carries a cookie dsh considers valid —
+ * so the password gate is the only gate the user interacts with, and the
+ * launch token never has to round-trip through the address bar.
  */
 
 /** How long a cached cookie is reused before a proactive re-exchange. */
@@ -40,10 +41,12 @@ function exchangeToken(target, tokenizedUrl) {
       port: target.port,
       path: `${url.pathname}${url.search}`,
       method: 'GET',
-      // dsh binds the cookie to the authority it observes, so the exchange must
-      // present exactly the authority the browser used to reach this proxy.
+      // dsh binds the cookie to the authority it observes, so present exactly
+      // the loopback authority the proxy forwards on. Ignore the tokenized
+      // URL's host: Connection may build it from a browser-facing value, but
+      // proxied traffic is always loopback.
       headers: {
-        host: url.host,
+        host: targetAuthority(target),
         accept: 'text/html',
         // Keep dsh's redirect from being followed implicitly; we only want the
         // Set-Cookie header off this one reply.
@@ -81,8 +84,8 @@ class CachedCookie {
 export class UpstreamAuth {
   /**
    * @param target Upstream `{ host, port }`.
-   * @param resolveTokenizedUrl Returns a tokenized URL for `http://<authority>/`,
-   *   or undefined while the Connection service is not available yet.
+   * @param resolveTokenizedUrl Returns a tokenized URL for the upstream
+   *   authority, or undefined while Connection is not available yet.
    * @param logger Optional logger for non-fatal exchange failures.
    */
   constructor(target, resolveTokenizedUrl, logger) {
@@ -116,10 +119,10 @@ export class UpstreamAuth {
   }
 
   async exchange(authority) {
-    const source = this.resolveTokenizedUrl?.()
-    if (source === undefined) return undefined
+    const tokenizedUrl = this.resolveTokenizedUrl?.(authority)
+    if (tokenizedUrl === undefined) return undefined
     try {
-      const pair = await exchangeToken(this.target, source(authority))
+      const pair = await exchangeToken(this.target, tokenizedUrl)
       this.cache.set(authority, new CachedCookie(pair, Date.now()))
       if (this.lastError !== null) {
         this.logger?.info('web-auth: recovered the dsh browser session for %s', authority)

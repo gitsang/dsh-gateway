@@ -30,11 +30,158 @@ const HOP_BY_HOP = new Set([
   'upgrade'
 ])
 
+/**
+ * Drop hop-by-hop headers named by the request's own `Connection` header, as
+ * required by RFC 9110, in addition to the fixed list above. Without this a
+ * proxy could forward a header relevant only to the browser-to-proxy hop.
+ */
 function filterHopByHop(headers) {
+  const connectionTokens = typeof headers.connection === 'string'
+    ? headers.connection.split(',').map((token) => token.trim().toLowerCase())
+    : []
   const out = {}
   for (const [name, value] of Object.entries(headers)) {
-    if (value === undefined || HOP_BY_HOP.has(name.toLowerCase())) continue
+    const lower = name.toLowerCase()
+    if (value === undefined || HOP_BY_HOP.has(lower) || connectionTokens.includes(lower)) continue
     out[name] = value
+  }
+  return out
+}
+
+/**
+ * Canonical `host:port` of the upstream dsh server, in the same form dsh uses
+ * for its authority-bound browser-session cookie. IPv6 literals are bracketed.
+ *
+ * @param target - the upstream `{ host, port }` tuple.
+ * @returns the upstream authority.
+ */
+export function targetAuthority(target) {
+  const host = String(target.host)
+  return `${host.includes(':') ? `[${host}]` : host}:${String(target.port)}`
+}
+
+/**
+ * Rewrite the request identity headers so the upstream sees a loopback
+ * request, regardless of the public hostname the browser used to reach this
+ * proxy.
+ *
+ * dsh and many dsh plugins treat a request as local when its `Host` (and the
+ * matching `Origin`) names loopback. A password-gated request has already
+ * been authenticated by this proxy, so forwarding the browser's public
+ * `Host`/`Origin` only makes those plugins reject an otherwise trusted
+ * request. This is the behavior the Traefik `dsh-loopback` middleware used to
+ * implement; doing it here keeps every deployment path consistent, including
+ * WebSocket upgrades.
+ *
+ * `Referer` is normalized for the same reason: it is a browser-origin hint,
+ * not user identity. `Sec-Fetch-Site` is deliberately left untouched, so dsh's
+ * CSRF fence still rejects genuinely cross-site traffic even after Host and
+ * Origin have been translated to loopback.
+ *
+ * Forwarding headers are rewritten too: a plugin that consults
+ * `X-Forwarded-For`/`X-Forwarded-Host` instead of the socket or `Host` must see
+ * the same loopback peer, not the public client address added by Traefik or
+ * nginx.
+ *
+ * @param headers - incoming request headers (already hop-by-hop filtered).
+ * @param target - the upstream `{ host, port }` tuple.
+ * @returns a new header object addressed to the loopback upstream.
+ */
+export function loopbackHeaders(headers, target) {
+  const authority = targetAuthority(target)
+  const origin = `http://${authority}`
+  const out = { ...headers, host: authority, origin }
+  if (typeof out.referer === 'string' && out.referer !== '') {
+    try {
+      const referer = new URL(out.referer)
+      referer.protocol = 'http:'
+      referer.host = authority
+      out.referer = referer.href
+    } catch {
+      // A malformed Referer is not worth preserving; make it local as well.
+      out.referer = `${origin}/`
+    }
+  }
+  if (out['x-forwarded-for'] !== undefined) out['x-forwarded-for'] = '127.0.0.1'
+  if (out['x-real-ip'] !== undefined) out['x-real-ip'] = '127.0.0.1'
+  if (out['x-forwarded-host'] !== undefined) out['x-forwarded-host'] = authority
+  if (out['x-forwarded-port'] !== undefined) out['x-forwarded-port'] = String(target.port)
+  if (out['x-forwarded-proto'] !== undefined) out['x-forwarded-proto'] = 'http'
+  if (out.forwarded !== undefined) {
+    out.forwarded = `for=127.0.0.1;host="${authority}";proto=http`
+  }
+  return out
+}
+
+/**
+ * The browser-facing origin of a request, reconstructed from the headers a
+ * reverse proxy forwards. Used to translate absolute upstream redirects back
+ * to the public origin after request headers were rewritten to loopback.
+ */
+export function browserOrigin(req) {
+  const host = req.headers.host
+  if (typeof host !== 'string' || host === '') return undefined
+  const origin = req.headers.origin
+  if (typeof origin === 'string' && origin !== '') {
+    try {
+      return new URL(origin).origin
+    } catch {
+      // Fall through to the forwarded/metadata hints.
+    }
+  }
+  const forwardedProto = req.headers['x-forwarded-proto']
+  const proto = typeof forwardedProto === 'string' && forwardedProto !== ''
+    ? forwardedProto.split(',', 1)[0].trim()
+    : 'http'
+  try {
+    return new URL(`${proto}://${host}`).origin
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Translate response headers generated against the loopback upstream back to
+ * the browser-facing origin. Only absolute `Location` values pointing at the
+ * upstream loopback origin are changed; relative redirects stay untouched.
+ *
+ * Upstream `dsh-auth-*` cookies are not relayed: the proxy redeemed that
+ * session server-side, and the cookie is bound to the loopback authority the
+ * browser never sees.
+ *
+ * @param headers - upstream response headers.
+ * @param req - the original browser request.
+ * @param target - the upstream `{ host, port }` tuple.
+ * @returns a new header object safe to send to the browser.
+ */
+export function rewriteResponseHeaders(headers, req, target) {
+  const out = { ...headers }
+  const loopback = `http://${targetAuthority(target)}`
+  const publicOrigin = browserOrigin(req)
+  if (
+    publicOrigin !== undefined &&
+    typeof out.location === 'string' &&
+    /^https?:\/\//i.test(out.location)
+  ) {
+    try {
+      const location = new URL(out.location)
+      if (location.origin === loopback) {
+        out.location = `${publicOrigin}${location.pathname}${location.search}${location.hash}`
+      }
+    } catch {
+      // Leave malformed/unusual Location values to the upstream.
+    }
+  }
+
+  const raw = out['set-cookie']
+  const cookies = raw === undefined ? [] : Array.isArray(raw) ? raw : [raw]
+  const kept = cookies.filter((cookie) => {
+    const pair = String(cookie).split(';', 1)[0]?.trim().toLowerCase() ?? ''
+    return !pair.startsWith(DSH_COOKIE_PREFIX)
+  })
+  if (raw !== undefined) {
+    if (kept.length === 0) delete out['set-cookie']
+    else out['set-cookie'] = Array.isArray(raw) ? kept : kept[0]
   }
   return out
 }
@@ -44,6 +191,9 @@ function filterHopByHop(headers) {
  * (`dsh-auth-<base64url sha256 of the request authority>`).
  */
 export const DSH_COOKIE_PREFIX = 'dsh-auth-'
+
+/** This proxy's own password-gate cookie; never forwarded upstream. */
+const COOKIE_NAME = 'dsh_web_session'
 
 /**
  * Return a copy of `headers` whose Cookie header holds only cookies that are
@@ -56,10 +206,15 @@ export const DSH_COOKIE_PREFIX = 'dsh-auth-'
 function replaceSessionCookie(headers, sessionCookie) {
   const out = { ...headers }
   const raw = out.cookie
+  const dropped = [DSH_COOKIE_PREFIX]
+  // The password-gate cookie is internal to this proxy. Forwarding it upstream
+  // would expose the browser's bearer token to every plugin; the dsh session
+  // cookie above is the only credential dsh itself needs.
+  dropped.push(`${COOKIE_NAME}=`)
   const kept = typeof raw === 'string'
     ? raw.split(';')
       .map((segment) => segment.trim())
-      .filter((segment) => segment !== '' && !segment.startsWith(DSH_COOKIE_PREFIX))
+      .filter((segment) => segment !== '' && !dropped.some((prefix) => segment.startsWith(prefix)))
     : []
   if (sessionCookie !== undefined) kept.push(sessionCookie)
   if (kept.length === 0) delete out.cookie
@@ -127,7 +282,8 @@ function relay(req, upstreamRes, res, options) {
   const statusCode = upstreamRes.statusCode ?? 502
 
   if (!wantsRewrite(req, upstreamRes, options)) {
-    res.writeHead(statusCode, upstreamRes.statusMessage, upstreamRes.headers)
+    const headers = rewriteResponseHeaders(upstreamRes.headers, req, options.target)
+    res.writeHead(statusCode, upstreamRes.statusMessage, headers)
     upstreamRes.pipe(res)
     return
   }
@@ -135,7 +291,7 @@ function relay(req, upstreamRes, res, options) {
   const chunks = []
   upstreamRes.on('data', (chunk) => chunks.push(chunk))
   upstreamRes.on('end', () => {
-    const headers = { ...upstreamRes.headers }
+    const headers = rewriteResponseHeaders(upstreamRes.headers, req, options.target)
     delete headers['transfer-encoding']
     let body = Buffer.concat(chunks).toString('utf8')
     // Host mode first: it must precede every dsh script in the head.
@@ -175,7 +331,8 @@ function isDocumentNavigation(req) {
 /** Issue one request to dsh; resolves with its response or rejects. */
 function send(target, req, options, body) {
   return new Promise((resolve, reject) => {
-    const headers = replaceSessionCookie(filterHopByHop(req.headers), options.sessionCookie)
+    let headers = replaceSessionCookie(filterHopByHop(req.headers), options.sessionCookie)
+    if (options.loopback !== false) headers = loopbackHeaders(headers, target)
     // dsh gzips HTML documents only for real browser navigations (Accept:
     // text/html + Sec-Fetch-Dest: document). A compressed body cannot be
     // rewritten, so ask for identity on exactly those requests; stylesheets,
@@ -259,7 +416,7 @@ export async function proxyRequest(req, res, target, options = {}) {
         continue
       }
       // Some other 401: replay the buffered reply to the client verbatim.
-      const headers = { ...upstreamRes.headers }
+      const headers = rewriteResponseHeaders(upstreamRes.headers, req, target)
       delete headers['transfer-encoding']
       headers['content-length'] = String(Buffer.concat(chunks).length)
       res.writeHead(401, upstreamRes.statusMessage, headers)
@@ -267,7 +424,7 @@ export async function proxyRequest(req, res, target, options = {}) {
       return
     }
 
-    relay(req, upstreamRes, res, { ...options, sessionCookie })
+    relay(req, upstreamRes, res, { ...options, sessionCookie, target })
     return
   }
 }
@@ -278,11 +435,13 @@ export async function proxyRequest(req, res, target, options = {}) {
  */
 export function proxyUpgrade(req, socket, head, target, options = {}) {
   // Keep Upgrade/Connection: they are what makes this an upgrade rather than an
-  // ordinary GET. Only the browser's dsh session cookie is replaced with the
-  // one redeemed for this authority.
-  const headers = replaceSessionCookie(req.headers, options.sessionCookie)
+  // ordinary GET. Replace the browser's dsh session cookie with the one
+  // redeemed for the upstream authority, then present the same loopback
+  // Host/Origin identity as ordinary HTTP requests.
+  let headers = replaceSessionCookie(req.headers, options.sessionCookie)
   delete headers['proxy-authorization']
   delete headers['proxy-authenticate']
+  if (options.loopback !== false) headers = loopbackHeaders(headers, target)
 
   const upstream = httpRequest({
     hostname: target.host,

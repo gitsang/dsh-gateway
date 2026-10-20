@@ -27,13 +27,17 @@ once on first use, and only then proxies requests through to the web server.
   page is the only login you see. dsh protects every `/api` call and WebSocket
   stream with a signed cookie whose name and payload are bound to the request
   authority (host + port), and it only hands that cookie out by redeeming a
-  per-process launch token on `GET /`. That token is printed on dsh's own port,
-  so redeeming it there mints a cookie for `host:3080` that is useless on the
-  proxy's `host:3081`: the password gate passes, then dsh answers
-  `401 dsh web authentication required`. The proxy therefore redeems the token
-  itself, per authority, and forwards the cookie dsh expects (dropping any
-  `dsh-auth-*` cookie the browser holds). An expired cookie is refreshed and the
-  request retried once, so a dsh restart does not bounce you back to 401.
+  per-process launch token on `GET /`. The proxy forwards every upstream
+  request as the loopback authority, so it redeems the token for that same
+  authority and forwards the cookie dsh expects (dropping any `dsh-auth-*`
+  cookie the browser holds). An expired cookie is refreshed and the request
+  retried once, so a dsh restart does not bounce you back to 401.
+- Authenticated HTTP requests **and WebSocket upgrades** are presented upstream
+  as loopback: `Host` and `Origin` are rewritten to
+  `http://127.0.0.1:<dsh web port>`, and `Referer` is translated to match.
+  dsh itself and plugins that require a local host therefore treat traffic
+  through this proxy as local without any Traefik/nginx header middleware.
+  `Sec-Fetch-Site` is left untouched so cross-site requests are still rejected.
 - By default the proxy also serves PWA assets (`/manifest.webmanifest`,
   `/sw.js`, `/favicon.svg`) and injects the manifest link plus a pass-through
   service-worker registration into HTML pages. The manifest references the
@@ -128,6 +132,50 @@ requests only (`Accept: text/html`) the proxy drops `Accept-Encoding`; scripts,
 styles and API payloads keep their compression. The same rewrite path is what
 makes the PWA tags work in a real browser.
 
+### Loopback identity for upstream plugins
+
+Once a request has passed the password gate, the proxy presents it to dsh as a
+local request. This is deliberate: dsh's `/api` trust fence and many plugins
+special-case loopback hosts, and a remote HTTPS reverse proxy would otherwise
+make them reject an already-authenticated user.
+
+The translation applies to ordinary HTTP and WebSocket upgrades:
+
+| Browser sends                          | Upstream receives                         |
+| -------------------------------------- | ----------------------------------------- |
+| `Host: dsh.example.com`                | `Host: 127.0.0.1:3080`                    |
+| `Origin: https://dsh.example.com`      | `Origin: http://127.0.0.1:3080`           |
+| `Referer: https://dsh.example.com/...` | `Referer: http://127.0.0.1:3080/...`      |
+
+The loopback cookie that satisfied dsh's own browser-session gate is minted for
+the same rewritten authority, so `/api` RPC and WebSocket streams continue to
+work without exposing that cookie to the browser.
+
+Because of this, reverse-proxy header middleware is no longer needed. For
+example, a Traefik router can point straight at the auth proxy and omit the
+old `Host`/`Origin` injection:
+
+```yaml
+http:
+  routers:
+    to-dsh:
+      rule: Host(`dsh.example.com`)
+      tls:
+        certResolver: aliResolver
+      service: dsh
+
+  services:
+    dsh:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:3081"
+```
+
+Do **not** apply this translation to a route that bypasses dsh-web-auth (for
+example a raw `:3080` route): that would hand unauthenticated traffic the same
+local identity. Keep dsh web bound to loopback and route external traffic only
+through the password gate.
+
 ### Exposing through the auth proxy
 
 The dsh web server itself is loopback-only (`--host 0.0.0.0` is rejected by
@@ -137,18 +185,10 @@ dsh web). To expose the UI on the LAN through this auth proxy, run:
 DSH_WEB_AUTH_HOST=0.0.0.0 dsh web
 ```
 
-The browser talks to the auth proxy with the proxy host in `Host`/`Origin`.
-For non-loopback proxy hostnames/IPs, tell dsh web's API trust fence about the
-same authority (the hostname or IP the browser uses, not the proxy port):
-
-```bash
-DSH_WEB_AUTH_HOST=0.0.0.0 dsh web --trusted-host 192.168.1.20
-# or, if the browser reaches it through a name with a port:
-DSH_WEB_AUTH_HOST=0.0.0.0 dsh web --trusted-host dsh-web.example.com:3081
-```
-
-`--trusted-host` is repeatable and is baked into the dsh web startup flags by
-whatever process manager runs `dsh web`.
+No `--trusted-host` flag is needed for proxied requests anymore: after the
+password gate, the proxy rewrites `Host`/`Origin` to the loopback upstream.
+Keep `--trusted-host` only if something else still reaches dsh directly under
+a non-loopback authority.
 
 ## Forgot password
 
@@ -171,6 +211,11 @@ This is intentionally minimal: no rate limiting, no CSRF tokens, no
 `HttpOnly`/`Secure`/`SameSite` cookie attributes, and sessions are stored as
 plain text token→expiry entries. Use it as a lightweight gate for a trusted
 local network, not as an internet-facing authentication layer.
+
+**Loopback identity widens that gate.** Every authenticated request reaches
+dsh as if it came from the local machine. Only the password gate separates an
+authenticated remote browser from host-local plugin surfaces, so keep the auth
+proxy itself behind HTTPS and do not expose dsh's raw port.
 
 **Host mode widens that gate.** `ownsHost: true` gives every signed-in browser
 the same configuration surface the Desktop shell has: editing settings (which

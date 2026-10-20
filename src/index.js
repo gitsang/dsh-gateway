@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { AuthStore, SessionStore } from './stores.js'
-import { parseCookies, proxyRequest, proxyUpgrade } from './proxy.js'
+import { parseCookies, proxyRequest, proxyUpgrade, targetAuthority } from './proxy.js'
 import { UpstreamAuth } from './upstream-auth.js'
 import { readFormBody, renderLoginPage, safeNext } from './pages.js'
 import { ICON_SVG, MANIFEST, SW_JS } from './pwa.js'
@@ -71,20 +71,6 @@ function lanAddresses() {
     .map((iface) => iface.address)
 }
 
-/**
- * The authority the browser used, as dsh will canonicalize it: lowercased host
- * with the default port stripped, IPv6 bracketed.
- */
-function requestAuthority(req) {
-  const host = req.headers.host
-  if (typeof host !== 'string' || host === '') return undefined
-  try {
-    return new URL(`http://${host}`).host
-  } catch {
-    return undefined
-  }
-}
-
 class WebAuthProxy extends Service {
   static Config = Config
 
@@ -106,11 +92,11 @@ class WebAuthProxy extends Service {
     const target = upstreamTarget(this.ctx.webServer)
     // dsh mints its browser-session cookie for the authority a request arrives
     // on, and only hands that cookie out through a per-process launch token on
-    // `GET /`. The proxy is the browser's only origin, so it redeems the token
-    // itself for each authority it serves and forwards the resulting cookie.
+    // `GET /`. Proxied requests always present the loopback upstream authority,
+    // so that is the one authority for which we redeem and cache a cookie.
     this.upstreamAuth = new UpstreamAuth(
       target,
-      () => this.tokenizedUrl.bind(this),
+      (authority) => this.tokenizedUrl(authority),
       this.ctx.logger
     )
     // The auth proxy listens next to dsh web by default (web port + 1).
@@ -176,12 +162,13 @@ class WebAuthProxy extends Service {
   }
 
   /**
-   * A tokenized application URL for `authority`, from dsh's Connection service.
+   * A tokenized application URL for the loopback `authority`, from dsh's
+   * Connection service.
    *
-   * dsh builds this URL from its own loopback address; we only need the token it
-   * embeds, so the authority is swapped for the one the browser is using. When
-   * Connection is absent the gate still works for the password layer, but dsh
-   * itself will answer 401 — exactly as it did before this custodian existed.
+   * dsh builds this URL from its own loopback address, which is also the
+   * authority every proxied request presents upstream. When Connection is
+   * absent the gate still works for the password layer, but dsh itself will
+   * answer 401 — exactly as it did before this custodian existed.
    */
   tokenizedUrl(authority) {
     const connection = this.ctx.get('connection')
@@ -258,17 +245,17 @@ class WebAuthProxy extends Service {
     const session = this.getSession(req)
     if (session !== undefined) {
       this.sessions.touch(session.token)
-      const authority = requestAuthority(req)
-      const cookie = authority === undefined ? undefined : await this.upstreamAuth.cookieFor(authority)
+      // The browser-facing Host is rewritten to this authority by proxy.js, so
+      // the dsh session cookie must be minted for the same loopback authority.
+      const authority = targetAuthority(target)
+      const cookie = await this.upstreamAuth.cookieFor(authority)
       await proxyRequest(req, res, target, {
         pwa: this.config.pwa,
         hostMode: this.config.hostMode,
         sessionCookie: cookie,
         // dsh rejected the cookie we cached (expired, or it restarted with a
         // new launch token). Redeem a fresh one and let the proxy retry.
-        reauthorize: authority === undefined
-          ? undefined
-          : () => this.reauthorize(authority)
+        reauthorize: () => this.reauthorize(authority)
       })
       return
     }
@@ -380,8 +367,8 @@ class WebAuthProxy extends Service {
       return
     }
     this.sessions.touch(session.token)
-    const authority = requestAuthority(req)
-    const cookie = authority === undefined ? undefined : await this.upstreamAuth.cookieFor(authority)
+    const authority = targetAuthority(target)
+    const cookie = await this.upstreamAuth.cookieFor(authority)
     proxyUpgrade(req, socket, head, target, { sessionCookie: cookie })
   }
 

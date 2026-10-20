@@ -3,6 +3,9 @@
   "description": "A lightweight password gate and reverse auth proxy in front of the dsh web UI.",
   "version": "0.1.0",
   "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",

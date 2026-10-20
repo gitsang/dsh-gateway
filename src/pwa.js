@@ -80,3 +80,27 @@ export function injectPwaTags(html) {
   if (!match) return html
   return html.replace(match[0], () => `<head${match[1]}>${PWA_HEAD_TAGS}`)
 }
+
+/**
+ * The marker comment makes {@link injectHostModeTag} idempotent.
+ *
+ * Why: dsh decides whether the page may read and write Host settings from
+ * `ctx.remote.$host.isLoopback`, which is
+ * `transport?.ownsHost === true || no location || loopback hostname`. A page
+ * served through this proxy is never on a loopback hostname, so without this
+ * tag Settings starts in `memory` mode and the Models page reports
+ * "settings are unavailable in this browser". Declaring the same transport
+ * flag the Desktop shell uses restores Host mode.
+ */
+export const HOST_MODE_HEAD_TAG = `
+<!-- dsh-web-auth-host-mode -->
+<script>globalThis.__DSH_TRANSPORT__={...(globalThis.__DSH_TRANSPORT__||{}),ownsHost:true}</script>`
+
+/** Inject the Host-mode transport flag right after the opening <head...> tag, at most once. */
+export function injectHostModeTag(html) {
+  if (typeof html !== 'string' || html === '') return html
+  if (html.includes('dsh-web-auth-host-mode')) return html
+  const match = /<head([^>]*)>/i.exec(html)
+  if (!match) return html
+  return html.replace(match[0], () => `<head${match[1]}>${HOST_MODE_HEAD_TAG}`)
+}

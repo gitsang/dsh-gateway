@@ -48,7 +48,13 @@ export const Config = z.object({
   port: z.natural().max(65535).default(envInt('DSH_WEB_AUTH_PORT')),
   ttlMs: z.natural().min(1).default(envInt('DSH_WEB_AUTH_TTL_MS', DEFAULT_TTL_MS)),
   dataDir: z.string().default(envString('DSH_WEB_AUTH_DATA_DIR', defaultDataDir())),
-  pwa: z.boolean().default(envBool('DSH_WEB_AUTH_PWA', true))
+  pwa: z.boolean().default(envBool('DSH_WEB_AUTH_PWA', true)),
+  // Declare the proxied page as a host-owning page so dsh uses Host settings
+  // (Models page, "open configuration file") instead of its read-only memory
+  // fallback. On by default because a remote dsh web UI is unusable without it;
+  // it does hand every signed-in user the same configuration-write surface the
+  // Desktop shell has, so set DSH_WEB_AUTH_HOST_MODE=0 to restore the fence.
+  hostMode: z.boolean().default(envBool('DSH_WEB_AUTH_HOST_MODE', true))
 })
 
 function upstreamTarget(webServer) {
@@ -245,6 +251,7 @@ class WebAuthProxy extends Service {
       const cookie = authority === undefined ? undefined : await this.upstreamAuth.cookieFor(authority)
       await proxyRequest(req, res, target, {
         pwa: this.config.pwa,
+        hostMode: this.config.hostMode,
         sessionCookie: cookie,
         // dsh rejected the cookie we cached (expired, or it restarted with a
         // new launch token). Redeem a fresh one and let the proxy retry.
@@ -372,6 +379,9 @@ class WebAuthProxy extends Service {
     const lan = this.config.host === '0.0.0.0' ? lanAddresses()[0] : undefined
     const lanText = lan === undefined ? '' : ` (LAN: http://${lan}:${String(this.proxyPort)})`
     console.log(`dsh web-auth: http://${host}:${String(this.proxyPort)} -> http://${target.host}:${String(target.port)}${lanText}`)
+    if (this.config.hostMode) {
+      console.log('dsh web-auth: host mode is ON — every signed-in user can edit this profile\'s settings and plugins')
+    }
   }
 
   async close() {

@@ -1,5 +1,5 @@
 import { request as httpRequest } from 'node:http'
-import { injectPwaTags } from './pwa.js'
+import { injectHostModeTag, injectPwaTags } from './pwa.js'
 
 /**
  * Parse a Cookie request header into a plain object. Only the first `name=`
@@ -105,21 +105,28 @@ function hasNoBody(method) {
   return method === 'GET' || method === 'HEAD'
 }
 
-/**
- * Write one upstream response to the client, injecting PWA tags into plain
- * uncompressed HTML when enabled. Everything else streams through untouched.
- */
-function relay(upstreamRes, res, options) {
-  const { pwa = true, method } = options
-  const statusCode = upstreamRes.statusCode ?? 502
-  const contentType = String(upstreamRes.headers['content-type'] ?? '')
-  const canInject = pwa &&
-    method === 'GET' &&
-    statusCode === 200 &&
-    contentType.includes('text/html') &&
-    !upstreamRes.headers['content-encoding']
+/** Whether this request/response pair is one we rewrite before relaying. */
+function wantsRewrite(req, upstreamRes, options) {
+  if (req.method !== 'GET') return false
+  if ((upstreamRes.statusCode ?? 0) !== 200) return false
+  if (!String(upstreamRes.headers['content-type'] ?? '').includes('text/html')) return false
+  // A compressed body cannot be patched in place; send() drops Accept-Encoding
+  // for document navigations so this should always hold.
+  if (upstreamRes.headers['content-encoding'] !== undefined) return false
+  return options.pwa !== false || options.hostMode === true
+}
 
-  if (!canInject) {
+/**
+ * Write one upstream response to the client, rewriting plain uncompressed HTML
+ * when enabled: PWA tags for the installable shell, and the Host-mode
+ * transport flag that lets the remote page use Host settings. Everything else
+ * streams through untouched.
+ */
+function relay(req, upstreamRes, res, options) {
+  const { method } = options
+  const statusCode = upstreamRes.statusCode ?? 502
+
+  if (!wantsRewrite(req, upstreamRes, options)) {
     res.writeHead(statusCode, upstreamRes.statusMessage, upstreamRes.headers)
     upstreamRes.pipe(res)
     return
@@ -130,7 +137,10 @@ function relay(upstreamRes, res, options) {
   upstreamRes.on('end', () => {
     const headers = { ...upstreamRes.headers }
     delete headers['transfer-encoding']
-    const body = injectPwaTags(Buffer.concat(chunks).toString('utf8'))
+    let body = Buffer.concat(chunks).toString('utf8')
+    // Host mode first: it must precede every dsh script in the head.
+    if (options.hostMode === true) body = injectHostModeTag(body)
+    if (options.pwa !== false) body = injectPwaTags(body)
     headers['content-length'] = Buffer.byteLength(body)
     res.writeHead(statusCode, upstreamRes.statusMessage, headers)
     res.end(body)
@@ -149,10 +159,31 @@ function relay(upstreamRes, res, options) {
   })
 }
 
+/**
+ * Whether a request is a top-level HTML navigation whose body we may rewrite.
+ * Mirrors the headers dsh's own compression middleware keys on.
+ * @param req - the incoming browser request.
+ * @returns true for a document GET/HEAD that accepts HTML.
+ */
+function isDocumentNavigation(req) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false
+  if (!String(req.headers.accept ?? '').includes('text/html')) return false
+  const dest = req.headers['sec-fetch-dest']
+  return dest === undefined || dest === 'document' || dest === 'iframe'
+}
+
 /** Issue one request to dsh; resolves with its response or rejects. */
 function send(target, req, options, body) {
   return new Promise((resolve, reject) => {
     const headers = replaceSessionCookie(filterHopByHop(req.headers), options.sessionCookie)
+    // dsh gzips HTML documents only for real browser navigations (Accept:
+    // text/html + Sec-Fetch-Dest: document). A compressed body cannot be
+    // rewritten, so ask for identity on exactly those requests; stylesheets,
+    // scripts and API payloads keep their compression.
+    const rewritesHtml = options.pwa !== false || options.hostMode === true
+    if (rewritesHtml && isDocumentNavigation(req)) {
+      delete headers['accept-encoding']
+    }
     if (body !== undefined) headers['content-length'] = String(body.length)
     const upstream = httpRequest({
       hostname: target.host,
@@ -236,7 +267,7 @@ export async function proxyRequest(req, res, target, options = {}) {
       return
     }
 
-    relay(upstreamRes, res, { ...options, sessionCookie })
+    relay(req, upstreamRes, res, { ...options, sessionCookie })
     return
   }
 }

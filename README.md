@@ -74,6 +74,7 @@ All configuration is optional and read from environment variables at boot:
 | `DSH_WEB_AUTH_TTL_MS`   | `86400000`                 | Rolling session expiry (24h)                          |
 | `DSH_WEB_AUTH_DATA_DIR` | `~/.dsh/profiles/web-auth` | Directory for `auth.json` and `session.json`          |
 | `DSH_WEB_AUTH_PWA`      | `1`                        | Serve PWA assets and inject PWA tags into HTML        |
+| `DSH_WEB_AUTH_HOST_MODE`| `1`                        | Declare the page a host-owning page (Host settings)   |
 | `DSH_HOME`              | `~/.dsh`                   | dsh home (used when `DSH_WEB_AUTH_DATA_DIR` is unset) |
 
 ### PWA (installable web app)
@@ -86,6 +87,34 @@ Browser install prompts require a secure context. `http://127.0.0.1:3081` and
 `http://localhost:3081` qualify; an exposed `http://192.168.x.x:3081` LAN URL
 does **not**. For LAN installability, terminate HTTPS in front of the proxy
 with a certificate the browser trusts.
+
+### Host mode (settings, Models page)
+
+dsh only lets a page read and write Host settings when it believes it is the
+owning host. Its client decides that with
+`ctx.remote.$host.isLoopback`, which is true for a loopback hostname, or when
+the page declares `globalThis.__DSH_TRANSPORT__ = { ownsHost: true }` — the
+same flag the Desktop shell sets.
+
+A page served through this proxy is never on a loopback hostname, so without
+that flag dsh falls back to its process-local `memory` settings transport. The
+visible symptom is **Settings → Models: "Loading the provider directory
+failed: settings are unavailable in this browser"**, and no settings change
+survives a reload.
+
+Host mode injects the flag into the proxied HTML:
+
+```html
+<script>globalThis.__DSH_TRANSPORT__={...(globalThis.__DSH_TRANSPORT__||{}),ownsHost:true}</script>
+```
+
+It is **on by default**, because a remote dsh web UI is otherwise unable to
+edit providers. Disable it with `DSH_WEB_AUTH_HOST_MODE=0`.
+
+Injection needs the upstream HTML uncompressed, so for HTML navigation
+requests only (`Accept: text/html`) the proxy drops `Accept-Encoding`; scripts,
+styles and API payloads keep their compression. The same rewrite path is what
+makes the PWA tags work in a real browser.
 
 ### Exposing through the auth proxy
 
@@ -130,3 +159,11 @@ This is intentionally minimal: no rate limiting, no CSRF tokens, no
 `HttpOnly`/`Secure`/`SameSite` cookie attributes, and sessions are stored as
 plain text token→expiry entries. Use it as a lightweight gate for a trusted
 local network, not as an internet-facing authentication layer.
+
+**Host mode widens that gate.** `ownsHost: true` gives every signed-in browser
+the same configuration surface the Desktop shell has: editing settings (which
+writes `cordis.patch.yml`), the "open configuration file" action, and
+installing or enabling plugin bundles. Since a plugin bundle is code the Host
+loads, anyone who can sign in can effectively run code on this machine. Keep
+host mode on only where every account with the password is trusted to do that,
+and set `DSH_WEB_AUTH_HOST_MODE=0` otherwise.

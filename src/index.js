@@ -161,6 +161,17 @@ class WebAuthProxy extends Service {
     })
 
     this.ctx.effect(() => async () => this.close(), 'web-auth.proxy')
+
+    // Primary Host-mode carrier: declare the transport flag inside dsh's own
+    // index.html, so it survives proxies that cache or rewrite our responses.
+    if (this.config.hostMode) {
+      this.ctx.inject(['webServer'], (webCtx) => {
+        webCtx.on('webserver/index-inject', (table) => {
+          table.push({ kind: 'global', name: '__DSH_TRANSPORT__', value: { ownsHost: true } })
+        })
+      })
+    }
+
     this.printUrl(target)
   }
 

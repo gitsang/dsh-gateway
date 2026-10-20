@@ -102,11 +102,21 @@ visible symptom is **Settings → Models: "Loading the provider directory
 failed: settings are unavailable in this browser"**, and no settings change
 survives a reload.
 
-Host mode injects the flag into the proxied HTML:
+Host mode carries the flag two ways:
 
-```html
-<script>globalThis.__DSH_TRANSPORT__={...(globalThis.__DSH_TRANSPORT__||{}),ownsHost:true}</script>
-```
+1. **Primary — native index injection.** The plugin pushes a
+   `webserver/index-inject` row, so dsh itself renders
+
+   ```html
+   <script>globalThis["__DSH_TRANSPORT__"] = {"ownsHost":true}</script>
+   ```
+
+   into its own `index.html`. This survives gzip, caching reverse proxies and
+   any hop that rewrites or re-serves our responses.
+
+2. **Fallback — head rewrite.** The proxy also patches the tag into HTML it
+   relays (see below), which keeps working if some deployment serves the page
+   from somewhere else.
 
 It is **on by default**, because a remote dsh web UI is otherwise unable to
 edit providers. Disable it with `DSH_WEB_AUTH_HOST_MODE=0`.

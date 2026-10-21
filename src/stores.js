@@ -30,14 +30,14 @@ export async function ensureDataDir(dir) {
     await readFile(gitignore, 'utf8')
   } catch (err) {
     if (err?.code === 'ENOENT') {
-      await writeFile(gitignore, 'auth.json\nsession.json\n', 'utf8')
+      await writeFile(gitignore, 'auth.json\nsession.json\nsettings.json\n', 'utf8')
       return
     }
     throw err
   }
 }
 
-async function readJsonFile(file) {
+export async function readJsonFile(file) {
   let raw
   try {
     raw = await readFile(file, 'utf8')
@@ -138,6 +138,26 @@ export class SessionStore {
 
   async delete(token) {
     if (this.tokens.delete(token)) await this.save()
+  }
+
+  /** Number of live sessions. */
+  size() {
+    return this.tokens.size
+  }
+
+  /**
+   * Revoke every session, optionally keeping the caller's current token.
+   * @returns the number of revoked sessions.
+   */
+  async deleteAll(exceptToken) {
+    let revoked = 0
+    for (const token of [...this.tokens.keys()]) {
+      if (token === exceptToken) continue
+      this.tokens.delete(token)
+      revoked += 1
+    }
+    if (revoked > 0) await this.save()
+    return revoked
   }
 
   scheduleSave() {

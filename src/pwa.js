@@ -1,5 +1,5 @@
 /**
- * PWA assets served by the dsh-web-auth proxy.
+ * PWA assets served by the dsh-gateway proxy.
  *
  * The browser talks to this proxy as the origin, so the manifest, service
  * worker and icons must be served from these paths on the proxy itself, not
@@ -9,7 +9,7 @@
 export const MANIFEST = {
   name: 'dsh web',
   short_name: 'dsh',
-  description: 'dsh web UI with password gate',
+  description: 'dsh web UI through dsh-gateway',
   start_url: '/',
   scope: '/',
   display: 'standalone',
@@ -21,25 +21,176 @@ export const MANIFEST = {
 }
 
 /**
- * A deliberately boring pass-through service worker. It only exists to make
- * the proxy origin installable; it must not cache the login flow, auth
- * cookies or upstream API responses. WebSocket upgrades are never seen by a
+ * The PWA service worker: a network-first shell plus a cache-first store for
+ * immutable assets. It never caches API traffic, login pages, auth redirects
+ * or responses marked `no-store`. WebSocket upgrades are never seen by a
  * service worker, so the proxy upgrade path is unaffected.
  */
 export const SW_JS = `
+const CACHE_PREFIX = 'dsh-gateway-';
+const SHELL_CACHE = 'dsh-gateway-shell-v1';
+const ASSET_CACHE = 'dsh-gateway-assets-v1';
+const NAVIGATION_TIMEOUT_MS = 3000;
+const MAX_ASSET_ENTRIES = 300;
+const PRECACHE = ['/manifest.webmanifest', '/favicon.svg'];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(SHELL_CACHE)
+      .then((cache) => cache.addAll(PRECACHE))
+      .catch(() => undefined)
+      .then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    const names = await caches.keys();
+    await Promise.all(names
+      .filter((name) => (name.startsWith(CACHE_PREFIX) || name.startsWith('dsh-web-auth-')) &&
+        name !== SHELL_CACHE && name !== ASSET_CACHE)
+      .map((name) => caches.delete(name)));
+    await self.clients.claim();
+  })());
+});
+
+function isAssetRequest(url) {
+  if (url.pathname.startsWith('/assets/')) return true;
+  return url.pathname.startsWith('/plugins/') && /[?&]rev=/.test(url.search);
+}
+
+function isRefreshableAsset(url) {
+  return url.pathname === '/manifest.webmanifest' ||
+    url.pathname === '/favicon.svg' ||
+    url.pathname === '/favicon-dark.svg';
+}
+
+function canStore(response) {
+  if (!response || !response.ok) return false;
+  if (response.redirected) return false;
+  if (response.type !== 'basic') return false;
+  return !/no-store/i.test(response.headers.get('cache-control') || '');
+}
+
+function canStoreDocument(response) {
+  if (!canStore(response)) return false;
+  return (response.headers.get('content-type') || '').indexOf('text/html') !== -1;
+}
+
+async function trimAssetCache(cache) {
+  const keys = await cache.keys();
+  const excess = keys.length - MAX_ASSET_ENTRIES;
+  if (excess <= 0) return;
+  await Promise.all(keys.slice(0, excess).map((key) => cache.delete(key)));
+}
+
+async function cacheFirst(request) {
+  const cache = await caches.open(ASSET_CACHE);
+  const cached = await cache.match(request);
+  if (cached !== undefined) return cached;
+  const response = await fetch(request);
+  if (canStore(response)) {
+    try {
+      await cache.put(request, response.clone());
+      await trimAssetCache(cache);
+    } catch (error) {
+      // A full or evicted cache must never break the page load.
+    }
+  }
+  return response;
+}
+
+async function staleWhileRevalidate(event, request) {
+  const cache = await caches.open(SHELL_CACHE);
+  const cached = await cache.match(request);
+  const network = fetch(request).then(async (response) => {
+    if (canStore(response)) {
+      try { await cache.put(request, response.clone()); } catch (error) {}
+    }
+    return response;
+  });
+  if (cached !== undefined) {
+    event.waitUntil(network.catch(() => undefined));
+    return cached;
+  }
+  return network;
+}
+
+async function networkFirstNavigation(event, request) {
+  const cache = await caches.open(SHELL_CACHE);
+  const cached = await cache.match(request);
+  const network = fetch(request).then(async (response) => {
+    if (canStoreDocument(response)) {
+      try { await cache.put(request, response.clone()); } catch (error) {}
+    }
+    return response;
+  });
+  if (cached === undefined) return network;
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      event.waitUntil(network.catch(() => undefined));
+      resolve(cached);
+    }, NAVIGATION_TIMEOUT_MS);
+    network.then((response) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(response);
+    }, () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(cached);
+    });
+  });
+}
+
+self.addEventListener('fetch', (event) => {
+  const request = event.request;
+  if (request.method !== 'GET') return;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;
+  if (request.headers.has('range')) return;
+  if (url.pathname === '/sw.js' || url.pathname === '/login' || url.pathname === '/logout' || url.pathname === '/connect') return;
+  if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return;
+  if (request.mode === 'navigate') {
+    event.respondWith(networkFirstNavigation(event, request));
+    return;
+  }
+  if (isAssetRequest(url)) {
+    event.respondWith(cacheFirst(request));
+    return;
+  }
+  if (isRefreshableAsset(url)) {
+    event.respondWith(staleWhileRevalidate(event, request));
+  }
+});
+`
+
+/**
+ * Served from /sw.js after PWA support is switched off. An already-installed
+ * worker updates itself into this version, drops the gateway caches and
+ * unregisters, so disabling PWA does not leave an old offline shell behind.
+ */
+export const SW_DISABLED_JS = `
+const CACHE_PREFIX = 'dsh-gateway-';
+const LEGACY_PREFIX = 'dsh-web-auth-';
+
 self.addEventListener('install', () => {
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
-});
-
-self.addEventListener('fetch', (event) => {
-  if (event.request.method !== 'GET' && event.request.method !== 'HEAD') {
-    return;
-  }
-  event.respondWith(fetch(event.request));
+  event.waitUntil((async () => {
+    const names = await caches.keys();
+    await Promise.all(names
+      .filter((name) => name.startsWith(CACHE_PREFIX) || name.startsWith(LEGACY_PREFIX))
+      .map((name) => caches.delete(name)));
+    await self.registration.unregister();
+  })());
 });
 `
 
@@ -62,20 +213,34 @@ export const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="ht
  * The comment is an idempotency marker for injectPwaTags().
  */
 export const PWA_HEAD_TAGS = `
-<!-- dsh-web-auth-pwa -->
+<!-- dsh-gateway-pwa -->
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta name="theme-color" content="#0f1115">
 <script>
+  if (window.location.pathname === '/login' && 'caches' in window) {
+    caches.has('dsh-gateway-shell-v1').then(function (exists) {
+      if (!exists) return;
+      return caches.open('dsh-gateway-shell-v1').then(function (cache) {
+        return cache.keys().then(function (keys) {
+          return Promise.all(keys.filter(function (key) {
+            return key.destination === 'document' || new URL(key.url).pathname === '/';
+          }).map(function (key) { return cache.delete(key); }));
+        });
+      });
+    }).catch(function () {});
+  }
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(function () {});
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(function () {});
+    });
   }
 </script>`
 
 /** Inject PWA tags right after the opening <head...> tag, at most once. */
 export function injectPwaTags(html) {
   if (typeof html !== 'string' || html === '') return html
-  if (html.includes('dsh-web-auth-pwa')) return html
+  if (html.includes('dsh-gateway-pwa')) return html
   const match = /<head([^>]*)>/i.exec(html)
   if (!match) return html
   return html.replace(match[0], () => `<head${match[1]}>${PWA_HEAD_TAGS}`)
@@ -93,13 +258,13 @@ export function injectPwaTags(html) {
  * flag the Desktop shell uses restores Host mode.
  */
 export const HOST_MODE_HEAD_TAG = `
-<!-- dsh-web-auth-host-mode -->
+<!-- dsh-gateway-host-mode -->
 <script>globalThis.__DSH_TRANSPORT__={...(globalThis.__DSH_TRANSPORT__||{}),ownsHost:true}</script>`
 
 /** Inject the Host-mode transport flag right after the opening <head...> tag, at most once. */
 export function injectHostModeTag(html) {
   if (typeof html !== 'string' || html === '') return html
-  if (html.includes('dsh-web-auth-host-mode')) return html
+  if (html.includes('dsh-gateway-host-mode')) return html
   const match = /<head([^>]*)>/i.exec(html)
   if (!match) return html
   return html.replace(match[0], () => `<head${match[1]}>${HOST_MODE_HEAD_TAG}`)

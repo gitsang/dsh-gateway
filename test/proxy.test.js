@@ -4,8 +4,9 @@ import { createServer } from 'node:http'
 import { connect } from 'node:net'
 import { once } from 'node:events'
 import test from 'node:test'
-import { loopbackHeaders, proxyRequest, proxyUpgrade, rewriteResponseHeaders, targetAuthority } from '../src/proxy.js'
+import { applyCachePolicy, isImmutableAssetUrl, loopbackHeaders, proxyRequest, proxyUpgrade, rewriteResponseHeaders, targetAuthority } from '../src/proxy.js'
 import { UpstreamAuth } from '../src/upstream-auth.js'
+import { PWA_HEAD_TAGS, SW_DISABLED_JS, SW_JS } from '../src/pwa.js'
 
 test('targetAuthority renders a canonical upstream authority', () => {
   assert.equal(targetAuthority({ host: '127.0.0.1', port: 3080 }), '127.0.0.1:3080')
@@ -187,4 +188,104 @@ test('UpstreamAuth redeems and caches a cookie for the loopback authority', asyn
     (value) => `http://${value}/?token=launch-token`
   ).cookieFor(authority)
   assert.match(cookie, /^dsh-auth-/)
+})
+
+
+test('immutable assets are detected by content hash or plugin revision', () => {
+  assert.equal(isImmutableAssetUrl('/assets/index-5SrrfWpU.js'), true)
+  assert.equal(isImmutableAssetUrl('/assets/vendor-BNsW4eBh.css?x=1'), true)
+  assert.equal(isImmutableAssetUrl('/plugins/??@scope/pkg/client.js&rev=67ec353e7a50'), true)
+  assert.equal(isImmutableAssetUrl('/plugins/@scope/pkg/client.js?rev=abc'), true)
+  assert.equal(isImmutableAssetUrl('/plugins/@scope/pkg/client.js'), false)
+  assert.equal(isImmutableAssetUrl('/'), false)
+})
+
+test('applyCachePolicy marks assets immutable and keeps HTML revalidated', () => {
+  const asset = applyCachePolicy(
+    { url: '/assets/index-5SrrfWpU.js' },
+    { 'content-type': 'text/javascript; charset=utf-8' }
+  )
+  assert.equal(asset['cache-control'], 'public, max-age=31536000, immutable')
+
+  const plugin = applyCachePolicy(
+    { url: '/plugins/??a/client.js&rev=abc' },
+    { 'content-type': 'text/javascript; charset=utf-8' }
+  )
+  assert.equal(plugin['cache-control'], 'public, max-age=31536000, immutable')
+
+  const html = applyCachePolicy(
+    { url: '/' },
+    { 'content-type': 'text/html; charset=utf-8', vary: 'Accept-Encoding' }
+  )
+  assert.equal(html['cache-control'], 'private, no-cache')
+  assert.equal(html.vary, 'Accept-Encoding, Cookie')
+
+  const api = applyCachePolicy(
+    { url: '/api/rpc' },
+    { 'content-type': 'application/json' }
+  )
+  assert.equal(api['cache-control'], 'no-store')
+
+  const missing = applyCachePolicy(
+    { url: '/assets/missing-abc.js' },
+    { 'content-type': 'text/plain' },
+    404
+  )
+  assert.equal(missing['cache-control'], 'no-store')
+})
+
+test('the service worker caches the shell and hashed assets but never API traffic', () => {
+  assert.doesNotThrow(() => new Function(SW_JS))
+  assert.match(SW_JS, /dsh-gateway-assets-v1/)
+  assert.match(SW_JS, /dsh-gateway-shell-v1/)
+  assert.match(SW_JS, /url\.pathname === '\/api' \|\| url\.pathname\.startsWith\('\/api\/'\)/)
+  assert.match(SW_JS, /event\.waitUntil\(network\.catch/)
+  assert.match(PWA_HEAD_TAGS, /updateViaCache: 'none'/)
+  assert.match(PWA_HEAD_TAGS, /key\.destination === 'document'/)
+  assert.doesNotThrow(() => new Function(SW_DISABLED_JS))
+  assert.match(SW_DISABLED_JS, /self\.registration\.unregister\(\)/)
+  assert.match(SW_DISABLED_JS, /dsh-web-auth-/)
+})
+
+
+test('proxyRequest adds HTTP cache headers by resource class', async (t) => {
+  const upstream = createServer((req, res) => {
+    if (req.url === '/assets/index-abc.js') {
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
+      res.end('console.log(1)')
+      return
+    }
+    if (req.url === '/api/rpc') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{}')
+      return
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', vary: 'Accept-Encoding' })
+    res.end('<!doctype html><html><head></head><body>ok</body></html>')
+  })
+  upstream.listen(0, '127.0.0.1')
+  await once(upstream, 'listening')
+  t.after(() => upstream.close())
+
+  const target = { host: '127.0.0.1', port: upstream.address().port }
+  const front = createServer((req, res) => {
+    proxyRequest(req, res, target, { pwa: false, hostMode: false }).catch((error) => {
+      res.writeHead(500)
+      res.end(String(error))
+    })
+  })
+  front.listen(0, '127.0.0.1')
+  await once(front, 'listening')
+  t.after(() => front.close())
+  const base = `http://127.0.0.1:${front.address().port}`
+
+  const asset = await fetch(`${base}/assets/index-abc.js`)
+  assert.equal(asset.headers.get('cache-control'), 'public, max-age=31536000, immutable')
+
+  const api = await fetch(`${base}/api/rpc`)
+  assert.equal(api.headers.get('cache-control'), 'no-store')
+
+  const html = await fetch(`${base}/`)
+  assert.equal(html.headers.get('cache-control'), 'private, no-cache')
+  assert.match(html.headers.get('vary') ?? '', /Cookie/)
 })

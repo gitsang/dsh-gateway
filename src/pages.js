@@ -187,7 +187,7 @@ export function renderLoginPage({ setup, error, next, pwa }) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)} · dsh web auth</title>
+<title>${escapeHtml(title)} · dsh gateway</title>
 ${pwa === false ? '' : PWA_HEAD_TAGS}
 <style>${LOGIN_THEME_CSS}</style>
 </head>

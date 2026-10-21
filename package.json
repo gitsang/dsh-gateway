@@ -1,7 +1,7 @@
 {
-  "name": "@gitsang/dsh-web-auth",
-  "description": "A lightweight password gate and reverse auth proxy in front of the dsh web UI.",
-  "version": "0.1.0",
+  "name": "@gitsang/dsh-gateway",
+  "description": "A secure, installable gateway for the dsh web UI: password access, reverse proxy, PWA delivery and Host-mode injection.",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "test": "node --test"
@@ -9,17 +9,47 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./client": "./src/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "src",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
   ],
   "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "gateway",
+    "reverse-proxy",
+    "pwa",
+    "authentication"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gitsang/dsh-gateway.git"
+  },
+  "homepage": "https://github.com/gitsang/dsh-gateway#readme",
+  "bugs": {
+    "url": "https://github.com/gitsang/dsh-gateway/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   },
   "dependencies": {
@@ -27,7 +57,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "react": "^18.2.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

@@ -125,7 +125,7 @@ export class UpstreamAuth {
       const pair = await exchangeToken(this.target, tokenizedUrl)
       this.cache.set(authority, new CachedCookie(pair, Date.now()))
       if (this.lastError !== null) {
-        this.logger?.info('web-auth: recovered the dsh browser session for %s', authority)
+        this.logger?.info('dsh-gateway: recovered the dsh browser session for %s', authority)
         this.lastError = null
       }
       return pair
@@ -133,7 +133,7 @@ export class UpstreamAuth {
       // Log the transition only: a request storm must not flood the log.
       if (this.lastError !== error?.message) {
         this.lastError = error?.message
-        this.logger?.warn('web-auth: cannot obtain a dsh browser session for %s: %s', authority, error?.message ?? error)
+        this.logger?.warn('dsh-gateway: cannot obtain a dsh browser session for %s: %s', authority, error?.message ?? error)
       }
       return undefined
     }

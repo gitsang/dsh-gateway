@@ -187,6 +187,79 @@ export function rewriteResponseHeaders(headers, req, target) {
 }
 
 /**
+ * Whether a request URL names an immutable, content-addressed asset.
+ *
+ * Vite assets carry their content hash in the filename. dsh's plugin bundle
+ * route puts the host-computed revision in the `rev` query parameter. Both can
+ * be cached for a year: a change always produces a different URL.
+ *
+ * @param rawUrl - a request URL or request target.
+ * @returns true when the URL is safe to cache immutably.
+ */
+export function isImmutableAssetUrl(rawUrl) {
+  let url
+  try {
+    url = new URL(rawUrl ?? '/', 'http://dsh-gateway.invalid')
+  } catch {
+    return false
+  }
+  if (url.pathname.startsWith('/assets/')) return true
+  return url.pathname.startsWith('/plugins/') && /[?&]rev=/.test(url.search)
+}
+
+/** Merge one token into a `Vary` header without duplicating it. */
+function addVary(headers, token) {
+  const current = headers.vary
+  const values = typeof current === 'string'
+    ? current.split(',').map((value) => value.trim()).filter((value) => value !== '')
+    : []
+  if (!values.some((value) => value.toLowerCase() === token.toLowerCase())) values.push(token)
+  headers.vary = values.join(', ')
+}
+
+/**
+ * Add cache policy to a proxied response.
+ *
+ * HTML is authenticated and rendered per request, so it must be revalidated on
+ * every navigation and must not enter a shared cache. Hashed assets are public
+ * and immutable. API traffic is never cacheable. Upstream dsh currently sends
+ * no cache headers for assets or the app shell, which is why a browser had no
+ * permission to persist them across reloads.
+ *
+ * @param req - the original browser request.
+ * @param headers - mutable response headers about to be written.
+ * @param statusCode - upstream response status; only successful immutable
+ *   resources may receive the one-year cache header.
+ * @returns the same headers object.
+ */
+export function applyCachePolicy(req, headers, statusCode = 200) {
+  if (isImmutableAssetUrl(req.url)) {
+    if (statusCode >= 200 && statusCode < 300) {
+      headers['cache-control'] = 'public, max-age=31536000, immutable'
+    } else if (statusCode >= 400) {
+      headers['cache-control'] = 'no-store'
+    }
+    return headers
+  }
+
+  let pathname = ''
+  try {
+    pathname = new URL(req.url ?? '/', 'http://dsh-gateway.invalid').pathname
+  } catch {
+    return headers
+  }
+  if (pathname === '/api' || pathname.startsWith('/api/')) {
+    headers['cache-control'] = 'no-store'
+    return headers
+  }
+  if (String(headers['content-type'] ?? '').includes('text/html')) {
+    headers['cache-control'] = 'private, no-cache'
+    addVary(headers, 'Cookie')
+  }
+  return headers
+}
+
+/**
  * The cookie prefix dsh uses for its signed browser-session cookies
  * (`dsh-auth-<base64url sha256 of the request authority>`).
  */
@@ -282,7 +355,7 @@ function relay(req, upstreamRes, res, options) {
   const statusCode = upstreamRes.statusCode ?? 502
 
   if (!wantsRewrite(req, upstreamRes, options)) {
-    const headers = rewriteResponseHeaders(upstreamRes.headers, req, options.target)
+    const headers = applyCachePolicy(req, rewriteResponseHeaders(upstreamRes.headers, req, options.target), statusCode)
     res.writeHead(statusCode, upstreamRes.statusMessage, headers)
     upstreamRes.pipe(res)
     return
@@ -291,7 +364,7 @@ function relay(req, upstreamRes, res, options) {
   const chunks = []
   upstreamRes.on('data', (chunk) => chunks.push(chunk))
   upstreamRes.on('end', () => {
-    const headers = rewriteResponseHeaders(upstreamRes.headers, req, options.target)
+    const headers = applyCachePolicy(req, rewriteResponseHeaders(upstreamRes.headers, req, options.target), statusCode)
     delete headers['transfer-encoding']
     let body = Buffer.concat(chunks).toString('utf8')
     // Host mode first: it must precede every dsh script in the head.
@@ -308,7 +381,7 @@ function relay(req, upstreamRes, res, options) {
         'cache-control': 'no-store',
         connection: 'close'
       })
-      res.end(`dsh-web-auth: upstream response error: ${err.message}`)
+      res.end(`dsh-gateway: upstream response error: ${err.message}`)
       return
     }
     res.destroy()
@@ -366,7 +439,7 @@ function fail(res, message) {
     'cache-control': 'no-store',
     connection: 'close'
   })
-  res.end(`dsh-web-auth: upstream unavailable: ${message}`)
+  res.end(`dsh-gateway: upstream unavailable: ${message}`)
 }
 
 /**
@@ -416,7 +489,7 @@ export async function proxyRequest(req, res, target, options = {}) {
         continue
       }
       // Some other 401: replay the buffered reply to the client verbatim.
-      const headers = rewriteResponseHeaders(upstreamRes.headers, req, target)
+      const headers = applyCachePolicy(req, rewriteResponseHeaders(upstreamRes.headers, req, target), 401)
       delete headers['transfer-encoding']
       headers['content-length'] = String(Buffer.concat(chunks).length)
       res.writeHead(401, upstreamRes.statusMessage, headers)

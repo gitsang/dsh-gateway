@@ -12,16 +12,13 @@ dsh's own browser-session gate, and can deliver the page as an installable PWA.
 
 ## Why “gateway”
 
-The project used to be `dsh-web-auth`. Authentication is still the front door,
-but the bundle now owns the whole browser-facing access layer: password
-sessions, reverse proxying, loopback identity for upstream plugins, dsh session
-recovery, PWA assets, service-worker caching, and Host-mode injection. A
-gateway describes that boundary; “web-auth” described only one implementation
-detail.
+Authentication is still the front door, but the bundle owns the whole
+browser-facing access layer: password sessions, reverse proxying, loopback
+identity for upstream plugins, dsh session recovery, PWA assets, service-worker
+caching, and Host-mode injection. A gateway describes that boundary.
 
-The package, bundle row, environment prefix and data directory use
-`dsh-gateway` / `gateway`. The local checkout directory may keep its old name;
-dsh resolves the package by name, not by folder name.
+The package, bundle row, environment prefix, session cookie and data directory
+all use `dsh-gateway` / `gateway`.
 
 ## How it works
 
@@ -32,7 +29,7 @@ dsh resolves the package by name, not by folder name.
 - After setup (or on later visits), entering the password exchanges it for a
   random 256-bit session token. The token is stored server-side in
   `~/.dsh/profiles/gateway/session.json` and delivered as a plain session
-  cookie (`dsh_web_session`, no extra attributes by default).
+  cookie (`dsh_gateway_session`, no extra attributes by default).
 - Every authenticated request refreshes that token's expiry by 24 hours
   (rolling expiry).
 - Once authenticated, requests are proxied straight back to the dsh web server
@@ -130,8 +127,6 @@ http://127.0.0.1:3081
 ## Configuration
 
 All configuration is optional and read from environment variables at boot.
-The new `DSH_GATEWAY_*` names take precedence; the old `DSH_WEB_AUTH_*` names
-are still accepted for one migration release.
 
 | Variable                | Default                   | Meaning                                               |
 | ----------------------- | ------------------------- | ----------------------------------------------------- |
@@ -279,21 +274,6 @@ No `--trusted-host` flag is needed for proxied requests anymore: after the
 password gate, the gateway rewrites `Host`/`Origin` to the loopback upstream.
 Keep `--trusted-host` only if something else still reaches dsh directly under
 a non-loopback authority.
-
-## Migrating from dsh-web-auth
-
-- The package is now `@gitsang/dsh-gateway`; the bundle patch inserts the
-  `gateway` row.
-- Environment variables use `DSH_GATEWAY_*`. For this release the old
-  `DSH_WEB_AUTH_*` names are still read when the new name is absent.
-- New installs use `~/.dsh/profiles/gateway`. At boot, if that directory does
-  not exist but `~/.dsh/profiles/web-auth` does, the gateway keeps using the
-  old directory so the password and sessions survive the rename. Set
-  `DSH_GATEWAY_DATA_DIR` to move it explicitly.
-- The session cookie remains `dsh_web_session`, so upgrading does not force a
-  re-login.
-- The `~/.dsh/profiles/gateway/settings.json` file is new; it stores only the
-  gateway toggles.
 
 ## Forgot password
 

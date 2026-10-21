@@ -103,7 +103,7 @@ test('proxyRequest forwards loopback identity and the redeemed session cookie', 
       host: 'dsh.example.com',
       origin: 'https://dsh.example.com',
       referer: 'https://dsh.example.com/ui',
-      cookie: 'dsh_web_session=password-ok; dsh-auth-public=stale',
+      cookie: 'dsh_gateway_session=password-ok; dsh-auth-public=stale',
       'content-type': 'text/plain'
     },
     body: 'hello'
@@ -154,7 +154,7 @@ test('proxyUpgrade forwards loopback identity for WebSocket streams', async (t) 
     'Connection: Upgrade',
     'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
     'Sec-WebSocket-Version: 13',
-    'Cookie: dsh_web_session=password-ok; dsh-auth-public=stale',
+    'Cookie: dsh_gateway_session=password-ok; dsh-auth-public=stale',
     '', ''
   ].join('\r\n'))
 
@@ -244,7 +244,7 @@ test('the service worker caches the shell and hashed assets but never API traffi
   assert.match(PWA_HEAD_TAGS, /key\.destination === 'document'/)
   assert.doesNotThrow(() => new Function(SW_DISABLED_JS))
   assert.match(SW_DISABLED_JS, /self\.registration\.unregister\(\)/)
-  assert.match(SW_DISABLED_JS, /dsh-web-auth-/)
+  assert.match(SW_DISABLED_JS, /dsh-gateway-/)
 })
 
 

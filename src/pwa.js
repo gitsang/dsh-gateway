@@ -47,7 +47,7 @@ self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const names = await caches.keys();
     await Promise.all(names
-      .filter((name) => (name.startsWith(CACHE_PREFIX) || name.startsWith('dsh-web-auth-')) &&
+      .filter((name) => name.startsWith(CACHE_PREFIX) &&
         name !== SHELL_CACHE && name !== ASSET_CACHE)
       .map((name) => caches.delete(name)));
     await self.clients.claim();
@@ -177,7 +177,6 @@ self.addEventListener('fetch', (event) => {
  */
 export const SW_DISABLED_JS = `
 const CACHE_PREFIX = 'dsh-gateway-';
-const LEGACY_PREFIX = 'dsh-web-auth-';
 
 self.addEventListener('install', () => {
   self.skipWaiting();
@@ -187,7 +186,7 @@ self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const names = await caches.keys();
     await Promise.all(names
-      .filter((name) => name.startsWith(CACHE_PREFIX) || name.startsWith(LEGACY_PREFIX))
+      .filter((name) => name.startsWith(CACHE_PREFIX))
       .map((name) => caches.delete(name)));
     await self.registration.unregister();
   })());

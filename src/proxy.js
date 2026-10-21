@@ -266,7 +266,7 @@ export function applyCachePolicy(req, headers, statusCode = 200) {
 export const DSH_COOKIE_PREFIX = 'dsh-auth-'
 
 /** This proxy's own password-gate cookie; never forwarded upstream. */
-const COOKIE_NAME = 'dsh_web_session'
+const COOKIE_NAME = 'dsh_gateway_session'
 
 /**
  * Return a copy of `headers` whose Cookie header holds only cookies that are

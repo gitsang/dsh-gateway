@@ -1,5 +1,5 @@
 import { createServer } from 'node:http'
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { networkInterfaces, homedir } from 'node:os'
 import { join } from 'node:path'
 import { Service } from '@deepseek-ai/cordis'
@@ -16,19 +16,19 @@ export const name = 'gateway'
 // omits the browser transport, it just cannot redeem a dsh session then.
 export const inject = ['webServer']
 
-export const COOKIE_NAME = 'dsh_web_session'
+export const COOKIE_NAME = 'dsh_gateway_session'
 export const GATEWAY_API_PREFIX = '/__dsh_gateway'
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8')
 ).version
 
-const HOST_ENV = ['DSH_GATEWAY_HOST', 'DSH_WEB_AUTH_HOST']
-const PORT_ENV = ['DSH_GATEWAY_PORT', 'DSH_WEB_AUTH_PORT']
-const TTL_ENV = ['DSH_GATEWAY_TTL_MS', 'DSH_WEB_AUTH_TTL_MS']
-const DATA_DIR_ENV = ['DSH_GATEWAY_DATA_DIR', 'DSH_WEB_AUTH_DATA_DIR']
-const PWA_ENV = ['DSH_GATEWAY_PWA', 'DSH_WEB_AUTH_PWA']
-const HOST_MODE_ENV = ['DSH_GATEWAY_HOST_MODE', 'DSH_WEB_AUTH_HOST_MODE']
+const HOST_ENV = ['DSH_GATEWAY_HOST']
+const PORT_ENV = ['DSH_GATEWAY_PORT']
+const TTL_ENV = ['DSH_GATEWAY_TTL_MS']
+const DATA_DIR_ENV = ['DSH_GATEWAY_DATA_DIR']
+const PWA_ENV = ['DSH_GATEWAY_PWA']
+const HOST_MODE_ENV = ['DSH_GATEWAY_HOST_MODE']
 
 /** Read the first non-empty environment variable from a compatibility list. */
 function envValue(names) {
@@ -65,20 +65,11 @@ function envBoolOverride(names) {
   return raw === undefined ? undefined : parseBool(raw)
 }
 
-function legacyDataDir() {
-  const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
-  return join(dshHome, 'profiles', 'web-auth')
-}
-
 function defaultDataDir() {
   const explicit = envValue(DATA_DIR_ENV)
   if (explicit !== undefined) return explicit
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
-  const current = join(dshHome, 'profiles', 'gateway')
-  const legacy = legacyDataDir()
-  // Preserve an existing password and its sessions across the rename. The
-  // directory name is local state, not part of the product identity.
-  return !existsSync(current) && existsSync(legacy) ? legacy : current
+  return join(dshHome, 'profiles', 'gateway')
 }
 
 export const Config = z.object({
@@ -137,10 +128,6 @@ class DshGateway extends Service {
 
   async [Service.init]() {
     await Promise.all([this.auth.init(), this.sessions.init(), this.settings.init()])
-
-    if (envValue(DATA_DIR_ENV) === undefined && this.config.dataDir === legacyDataDir()) {
-      console.warn(`dsh-gateway: using legacy data directory ${this.config.dataDir} (set DSH_GATEWAY_DATA_DIR to move it)`)
-    }
 
     const saved = this.settings.snapshot()
     this.runtimePwa = this.envOverrides.pwa ?? saved.pwa ?? this.config.pwa

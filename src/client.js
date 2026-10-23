@@ -1,27 +1,33 @@
 /**
  * Browser half of dsh-gateway.
  *
- * One plugin row owns both the gateway and its settings. The row is not split
- * into qol-style components: PWA delivery and Host-mode injection share the
- * proxy lifecycle and must never be turned off independently of access. This
- * section therefore exposes the two safe user-facing modes, plus gateway
- * status and access operations.
+ * One plugin row owns both the gateway and its configuration. The page lives
+ * on that Plugins row instead of inside Settings; PWA delivery and Host-mode
+ * injection share the proxy lifecycle and must never be turned off
+ * independently of access. The page therefore exposes the two safe modes,
+ * gateway status, and access operations.
+ *
+ * The form uses the same SettingsForm/field/switch primitives and the same
+ * section rhythm as the official plugin configuration pages.
  */
 window.__ModuleLoader__.load({
   id: '@gitsang/dsh-gateway',
   factory: (require) => {
     const React = require('react')
+    const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
+    const { Button, SettingsForm, Switch } = primitives
     const module = { exports: {} }
     const exports = module.exports
 
     const NS = 'gatewaySettings'
     const API = '/__dsh_gateway'
-    const CSS_ID = '@gitsang/dsh-gateway/GatewaySettings.css'
+    const CSS_ID = '@gitsang/dsh-gateway/GatewayConfig.css'
 
     const zh = {
       nav: '网关',
       title: '网关',
       intro: '管理 dsh 的安全入口、浏览器交付方式和上游连接。',
+      summary: '管理 dsh 的安全入口、浏览器交付方式和上游连接',
       status: '运行状态',
       listen: '监听地址',
       upstream: '上游 dsh',
@@ -56,6 +62,12 @@ window.__ModuleLoader__.load({
       saved: '设置已保存。',
       loading: '正在读取网关状态…',
       unknownError: '操作失败，请稍后重试。',
+      save: '保存',
+      saving: '保存中…',
+      saveFailed: '保存失败，请重试。',
+      readOnly: '当前部署的设置为只读。',
+      unavailable: '该组件当前不可配置。',
+      credentialRequired: '必填',
       day: '天',
       hour: '小时',
       minute: '分钟',
@@ -66,6 +78,7 @@ window.__ModuleLoader__.load({
       nav: 'Gateway',
       title: 'Gateway',
       intro: 'Manage the secure entry point, browser delivery and upstream connection for dsh.',
+      summary: 'Manage the secure entry point, browser delivery and upstream connection for dsh',
       status: 'Status',
       listen: 'Listening on',
       upstream: 'Upstream dsh',
@@ -100,6 +113,12 @@ window.__ModuleLoader__.load({
       saved: 'Settings saved.',
       loading: 'Loading gateway status…',
       unknownError: 'The operation failed. Try again.',
+      save: 'Save',
+      saving: 'Saving…',
+      saveFailed: 'Could not save. Try again.',
+      readOnly: 'This deployment stores settings read-only.',
+      unavailable: 'This component cannot be configured right now.',
+      credentialRequired: 'Required',
       day: 'd',
       hour: 'h',
       minute: 'm',
@@ -107,39 +126,32 @@ window.__ModuleLoader__.load({
     }
 
     const CSS = [
-      '.dshGatewaySection{max-width:760px;color:var(--dsw-alias-label-primary);flex-direction:column;gap:18px;display:flex}',
-      '.dshGatewayHeading{margin:0;font-size:18px;font-weight:600;line-height:26px}',
-      '.dshGatewayIntro{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px}',
-      '.dshGatewayGroup{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:12px}',
-      '.dshGatewayGroupTitle{margin:0;font-size:14px;font-weight:600;line-height:22px}',
-      '.dshGatewayRow{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;padding:2px 0}',
-      '.dshGatewayRowText{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}',
-      '.dshGatewayRowTitle{font-size:14px;line-height:22px}',
-      '.dshGatewayRowDesc{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}',
-      '.dshGatewayRowValue{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}',
-      '.dshGatewayBadge{border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:1px 8px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:18px;white-space:nowrap}',
-      '.dshGatewayBadgeWarn{color:var(--dsw-alias-state-error-primary);border-color:currentColor}',
-      '.dshGatewaySwitch{width:40px;height:22px;border-radius:999px;border:0;background:var(--dsw-alias-border-l2);position:relative;cursor:pointer;flex:none;transition:background .15s ease}',
-      '.dshGatewaySwitch[data-on=true]{background:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary))}',
-      '.dshGatewaySwitch:after{content:"";position:absolute;width:18px;height:18px;border-radius:50%;background:#fff;top:2px;left:2px;transition:transform .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.2)}',
-      '.dshGatewaySwitch[data-on=true]:after{transform:translateX(18px)}',
-      '.dshGatewaySwitch:disabled{opacity:.45;cursor:not-allowed}',
+      '.dshGatewayPage{display:flex;flex-direction:column;gap:0;max-width:760px;color:var(--dsw-alias-label-primary)}',
+      '.dshGatewaySection{display:flex;flex-direction:column;gap:10px;padding:16px 0}',
+      '.dshGatewaySection+.dshGatewaySection{border-top:.5px solid var(--dsw-alias-border-l2)}',
+      '.dshGatewayHeading{margin:0;font-size:13px;font-weight:600;line-height:1.5;color:var(--dsw-alias-label-primary)}',
+      '.dshGatewayRows{display:flex;flex-direction:column;gap:8px;margin:0}',
+      '.dshGatewayRow{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;font-size:12px;line-height:1.5}',
+      '.dshGatewayRow dt{color:var(--dsw-alias-label-tertiary)}',
+      '.dshGatewayRow dd{margin:0;min-width:0;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;font-variant-numeric:tabular-nums}',
+      '.dshGatewayCode{font-family:var(--dsw-font-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);font-size:11px}',
+      '.dshGatewayField{display:flex;flex-direction:column;gap:6px;padding:12px 0}',
+      '.dshGatewayField+.dshGatewayField{border-top:.5px solid var(--dsw-alias-border-l2)}',
+      '.dshGatewayToggleRow{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}',
+      '.dshGatewayFieldText{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}',
+      '.dshGatewayLabel{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}',
+      '.dshGatewayHint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
+      '.dshGatewayWarning{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-state-error-primary)}',
       '.dshGatewayActions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}',
-      '.dshGatewayButton{border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);padding:6px 12px;font:inherit;font-size:13px;line-height:20px;cursor:pointer}',
-      '.dshGatewayButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}',
-      '.dshGatewayButton:disabled{opacity:.45;cursor:not-allowed}',
-      '.dshGatewayButtonDanger{color:var(--dsw-alias-state-error-primary)}',
-      '.dshGatewayButtonPrimary{background:var(--dsw-alias-button-primary-fill);border-color:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground)}',
       '.dshGatewayForm{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:end}',
       '@media(max-width:680px){.dshGatewayForm{grid-template-columns:1fr}}',
-      '.dshGatewayField{display:flex;flex-direction:column;gap:4px}',
-      '.dshGatewayField label{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}',
-      '.dshGatewayInput{width:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-specific-login-input,var(--dsw-alias-bg-base));color:var(--dsw-alias-label-primary);padding:7px 10px;font:inherit;font-size:13px;line-height:20px}',
-      '.dshGatewayMessage{margin:0;font-size:13px;line-height:20px}',
+      '.dshGatewayInput{box-sizing:border-box;width:100%;height:34px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:1.5}',
+      '.dshGatewayInput:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}',
+      '.dshGatewayMessage{margin:0;font-size:12px;line-height:1.5}',
       '.dshGatewayError{color:var(--dsw-alias-state-error-primary)}',
       '.dshGatewayNotice{color:var(--dsw-alias-label-tertiary)}',
-      '.dshGatewayFootnote{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}',
-      '.dshGatewayCode{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}'
+      '.dshGatewayBadge{border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 8px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:18px;white-space:nowrap}',
+      '.dshGatewayBadgeWarn{color:var(--dsw-alias-state-error-primary);border-color:currentColor}'
     ].join('')
     if (
       typeof document !== 'undefined' &&
@@ -151,7 +163,6 @@ window.__ModuleLoader__.load({
       tag.textContent = CSS
       document.head.appendChild(tag)
     }
-
 
     /** Call the gateway's authenticated settings API. */
     async function request(path, options = {}) {
@@ -189,41 +200,63 @@ window.__ModuleLoader__.load({
       return `${String(seconds)}${t('second')}`
     }
 
-    function StatusRow({ label, value }) {
-      return React.createElement(
-        'div',
-        { className: 'dshGatewayRow' },
-        React.createElement('div', { className: 'dshGatewayRowText' },
-          React.createElement('div', { className: 'dshGatewayRowTitle' }, label)),
-        React.createElement('div', { className: 'dshGatewayRowValue dshGatewayCode' }, value)
+    function StatusFact({ label, value }) {
+      return React.createElement(React.Fragment, null,
+        React.createElement('dt', null, label),
+        React.createElement('dd', { className: 'dshGatewayCode' }, value)
       )
     }
 
-    function FeatureSwitch({ checked, disabled, label, onChange }) {
-      return React.createElement('button', {
-        type: 'button',
-        className: 'dshGatewaySwitch',
-        role: 'switch',
-        'aria-checked': checked,
-        'aria-label': label,
-        'data-on': checked ? 'true' : 'false',
-        disabled,
-        onClick: onChange
-      })
+    function ToggleField({ label, hint, checked, disabled, badge, warning, onChange }) {
+      return React.createElement('div', { className: 'dshGatewayField' },
+        React.createElement('div', { className: 'dshGatewayToggleRow' },
+          React.createElement('div', { className: 'dshGatewayFieldText' },
+            React.createElement('span', { className: 'dshGatewayLabel' }, label),
+            hint === undefined ? null : React.createElement('p', { className: 'dshGatewayHint' }, hint)
+          ),
+          React.createElement('div', { className: 'dshGatewayActions' },
+            badge === undefined ? null : badge,
+            React.createElement(Switch, { checked, disabled, label, onChange })
+          )
+        ),
+        warning === undefined ? null : React.createElement('p', { className: 'dshGatewayWarning' }, warning)
+      )
     }
 
-    function GatewaySettingsView({ t }) {
+    function PasswordInput({ id, label, autoComplete, value, onChange }) {
+      return React.createElement('div', { className: 'dshGatewayField' },
+        React.createElement('label', { className: 'dshGatewayLabel', htmlFor: id }, label),
+        React.createElement('input', {
+          id,
+          className: 'dshGatewayInput',
+          type: 'password',
+          autoComplete,
+          value,
+          onChange: (event) => onChange(event.target.value)
+        })
+      )
+    }
+
+    function GatewayConfig({ view, t }) {
       const [state, setState] = React.useState(null)
+      const [staged, setStaged] = React.useState(null)
       const [error, setError] = React.useState('')
       const [notice, setNotice] = React.useState('')
       const [busy, setBusy] = React.useState('')
+      const [saving, setSaving] = React.useState(false)
+      const [saveFailed, setSaveFailed] = React.useState(false)
       const [form, setForm] = React.useState({ currentPassword: '', newPassword: '', confirm: '' })
+
+      const applyState = React.useCallback((next) => {
+        setState(next)
+        setStaged({ pwa: next.pwa.value, hostMode: next.hostMode.configured })
+      }, [])
 
       const refresh = React.useCallback(async () => {
         const next = await request('/state')
-        setState(next)
+        applyState(next)
         return next
-      }, [])
+      }, [applyState])
 
       React.useEffect(() => {
         let alive = true
@@ -253,18 +286,25 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function saveSettings(patch) {
-        setBusy('settings')
+      async function saveSettings() {
+        if (staged === null || state === null) return
+        setSaving(true)
+        setSaveFailed(false)
         setError('')
         setNotice('')
         try {
-          setState(await request('/settings', { method: 'POST', body: JSON.stringify(patch) }))
-          if (patch.pwa === false) await dropOfflineShell()
+          const next = await request('/settings', {
+            method: 'POST',
+            body: JSON.stringify({ pwa: staged.pwa, hostMode: staged.hostMode })
+          })
+          if (staged.pwa === false) await dropOfflineShell()
+          applyState(next)
           setNotice(t('saved'))
         } catch (err) {
+          setSaveFailed(true)
           setError(err?.message || t('unknownError'))
         } finally {
-          setBusy('')
+          setSaving(false)
         }
       }
 
@@ -316,152 +356,161 @@ window.__ModuleLoader__.load({
         }
       }
 
-      if (state === null) {
-        return React.createElement('section', { className: 'dshGatewaySection' },
-          React.createElement('h2', { className: 'dshGatewayHeading' }, t('title')),
-          React.createElement('p', { className: 'dshGatewayIntro' }, error || t('loading')))
+      if (view === 'summary') return t('summary')
+
+      if (state === null || staged === null) {
+        return React.createElement('p', { className: 'dshGatewayHint', role: 'status' }, error || t('loading'))
       }
 
       const busyNow = busy !== ''
-      return React.createElement('section', { className: 'dshGatewaySection' },
-        React.createElement('h2', { className: 'dshGatewayHeading' }, t('title')),
-        React.createElement('p', { className: 'dshGatewayIntro' }, t('intro')),
-        error === '' ? null : React.createElement('p', { className: 'dshGatewayMessage dshGatewayError', role: 'alert' }, error),
-        notice === '' ? null : React.createElement('p', { className: 'dshGatewayMessage dshGatewayNotice', role: 'status' }, notice),
+      const dirty = staged.pwa !== state.pwa.value || staged.hostMode !== state.hostMode.configured
+      const shell = {
+        available: true,
+        writable: true,
+        dirty,
+        invalid: false,
+        saving,
+        failed: saveFailed
+      }
 
-        React.createElement('div', { className: 'dshGatewayGroup' },
-          React.createElement('h3', { className: 'dshGatewayGroupTitle' }, t('status')),
-          React.createElement(StatusRow, { label: t('listen'), value: `${state.listen.host}:${String(state.listen.port)}` }),
-          React.createElement(StatusRow, { label: t('upstream'), value: `${state.upstream.host}:${String(state.upstream.port)}` }),
-          React.createElement(StatusRow, { label: t('sessions'), value: String(state.sessions) }),
-          React.createElement(StatusRow, { label: t('uptime'), value: formatUptime(state.uptimeMs, t) }),
-          React.createElement(StatusRow, { label: t('version'), value: state.version }),
-          React.createElement(StatusRow, { label: t('dataDir'), value: state.dataDir })
-        ),
-
-        React.createElement('div', { className: 'dshGatewayGroup' },
-          React.createElement('h3', { className: 'dshGatewayGroupTitle' }, t('browser')),
-          React.createElement('div', { className: 'dshGatewayRow' },
-            React.createElement('div', { className: 'dshGatewayRowText' },
-              React.createElement('div', { className: 'dshGatewayRowTitle' }, t('pwaTitle')),
-              React.createElement('div', { className: 'dshGatewayRowDesc' }, t('pwaDesc'))),
-            React.createElement('div', { className: 'dshGatewayActions' },
-              state.pwa.locked ? React.createElement('span', { className: 'dshGatewayBadge' }, t('envManaged')) : null,
-              React.createElement(FeatureSwitch, {
-                checked: state.pwa.value,
-                disabled: busyNow || state.pwa.locked,
-                label: t('pwaTitle'),
-                onChange: () => { void saveSettings({ pwa: !state.pwa.value }) }
-              }))
-          ),
+      return React.createElement('div', { className: 'dshGatewayPage' },
+        React.createElement(SettingsForm, {
+          labels: {
+            unavailable: t('unavailable'),
+            readOnly: t('readOnly'),
+            saveFailed: t('saveFailed'),
+            save: t('save'),
+            saving: t('saving')
+          },
+          state: shell,
+          onSave: () => { void saveSettings() },
+          onDiscard: () => {
+            setStaged({ pwa: state.pwa.value, hostMode: state.hostMode.configured })
+            setSaveFailed(false)
+          }
+        },
+        React.createElement('section', { className: 'dshGatewaySection' },
+          React.createElement('h3', { className: 'dshGatewayHeading' }, t('browser')),
+          React.createElement(ToggleField, {
+            label: t('pwaTitle'),
+            hint: t('pwaDesc'),
+            checked: staged.pwa,
+            disabled: busyNow || saving || state.pwa.locked,
+            badge: state.pwa.locked ? React.createElement('span', { className: 'dshGatewayBadge' }, t('envManaged')) : undefined,
+            onChange: (checked) => { setStaged((previous) => ({ ...previous, pwa: checked })) }
+          }),
           React.createElement('div', { className: 'dshGatewayActions' },
-            React.createElement('button', {
-              type: 'button',
-              className: 'dshGatewayButton',
+            React.createElement(Button, {
+              size: 'sm',
+              variant: 'outline',
               disabled: busyNow,
               onClick: () => { void clearCache() }
-            }, t('clearCache')))
+            }, t('clearCache'))
+          )
         ),
-
-        React.createElement('div', { className: 'dshGatewayGroup' },
-          React.createElement('h3', { className: 'dshGatewayGroupTitle' }, t('access')),
-          React.createElement('form', { className: 'dshGatewayForm', onSubmit: changePassword },
-            React.createElement('div', { className: 'dshGatewayField' },
-              React.createElement('label', { htmlFor: 'dsh-gateway-current' }, t('currentPassword')),
-              React.createElement('input', {
-                id: 'dsh-gateway-current',
-                className: 'dshGatewayInput',
-                type: 'password',
-                autoComplete: 'current-password',
-                value: form.currentPassword,
-                onChange: (event) => setForm({ ...form, currentPassword: event.target.value })
-              })),
-            React.createElement('div', { className: 'dshGatewayField' },
-              React.createElement('label', { htmlFor: 'dsh-gateway-new' }, t('newPassword')),
-              React.createElement('input', {
-                id: 'dsh-gateway-new',
-                className: 'dshGatewayInput',
-                type: 'password',
-                autoComplete: 'new-password',
-                value: form.newPassword,
-                onChange: (event) => setForm({ ...form, newPassword: event.target.value })
-              })),
-            React.createElement('div', { className: 'dshGatewayField' },
-              React.createElement('label', { htmlFor: 'dsh-gateway-confirm' }, t('confirmPassword')),
-              React.createElement('input', {
-                id: 'dsh-gateway-confirm',
-                className: 'dshGatewayInput',
-                type: 'password',
-                autoComplete: 'new-password',
-                value: form.confirm,
-                onChange: (event) => setForm({ ...form, confirm: event.target.value })
-              })),
-            React.createElement('div', { className: 'dshGatewayActions' },
-              React.createElement('button', {
-                type: 'submit',
-                className: 'dshGatewayButton dshGatewayButtonPrimary',
-                disabled: busyNow
-              }, t('changePassword')))
-          ),
-          React.createElement('div', { className: 'dshGatewayRow' },
-            React.createElement('div', { className: 'dshGatewayRowText' },
-              React.createElement('div', { className: 'dshGatewayRowTitle' }, t('logoutAll')),
-              React.createElement('div', { className: 'dshGatewayRowDesc' }, t('logoutAllDesc'))),
-            React.createElement('button', {
-              type: 'button',
-              className: 'dshGatewayButton dshGatewayButtonDanger',
-              disabled: busyNow,
-              onClick: () => { void logoutAll() }
-            }, t('logoutAll')))
-        ),
-
-        React.createElement('div', { className: 'dshGatewayGroup' },
-          React.createElement('h3', { className: 'dshGatewayGroupTitle' }, t('advanced')),
-          React.createElement('div', { className: 'dshGatewayRow' },
-            React.createElement('div', { className: 'dshGatewayRowText' },
-              React.createElement('div', { className: 'dshGatewayRowTitle' }, t('hostModeTitle')),
-              React.createElement('div', { className: 'dshGatewayRowDesc' }, t('hostModeDesc'))),
-            React.createElement('div', { className: 'dshGatewayActions' },
-              state.hostMode.locked ? React.createElement('span', { className: 'dshGatewayBadge' }, t('envManaged')) : null,
-              state.hostMode.restartRequired ? React.createElement('span', { className: 'dshGatewayBadge dshGatewayBadgeWarn' }, t('restartRequired')) : null,
-              React.createElement(FeatureSwitch, {
-                checked: state.hostMode.configured,
-                disabled: busyNow || state.hostMode.locked,
-                label: t('hostModeTitle'),
-                onChange: () => { void saveSettings({ hostMode: !state.hostMode.configured }) }
-              }))
-          ),
+        React.createElement('section', { className: 'dshGatewaySection' },
+          React.createElement('h3', { className: 'dshGatewayHeading' }, t('advanced')),
+          React.createElement(ToggleField, {
+            label: t('hostModeTitle'),
+            hint: t('hostModeDesc'),
+            checked: staged.hostMode,
+            disabled: busyNow || saving || state.hostMode.locked,
+            badge: state.hostMode.locked
+              ? React.createElement('span', { className: 'dshGatewayBadge' }, t('envManaged'))
+              : state.hostMode.restartRequired
+                ? React.createElement('span', { className: 'dshGatewayBadge dshGatewayBadgeWarn' }, t('restartRequired'))
+                : undefined,
+            warning: t('hostModeWarning'),
+            onChange: (checked) => { setStaged((previous) => ({ ...previous, hostMode: checked })) }
+          }),
           state.hostMode.restartRequired
-            ? React.createElement('p', { className: 'dshGatewayFootnote' }, t('restartHint'))
-            : null,
-          React.createElement('p', { className: 'dshGatewayFootnote' }, t('hostModeWarning'))
+            ? React.createElement('p', { className: 'dshGatewayHint' }, t('restartHint'))
+            : null
+        ),
+        React.createElement('section', { className: 'dshGatewaySection' },
+          React.createElement('h3', { className: 'dshGatewayHeading' }, t('access')),
+          React.createElement('form', { className: 'dshGatewayForm', onSubmit: changePassword },
+            React.createElement(PasswordInput, {
+              id: 'dsh-gateway-current',
+              label: t('currentPassword'),
+              autoComplete: 'current-password',
+              value: form.currentPassword,
+              onChange: (value) => setForm({ ...form, currentPassword: value })
+            }),
+            React.createElement(PasswordInput, {
+              id: 'dsh-gateway-new',
+              label: t('newPassword'),
+              autoComplete: 'new-password',
+              value: form.newPassword,
+              onChange: (value) => setForm({ ...form, newPassword: value })
+            }),
+            React.createElement(PasswordInput, {
+              id: 'dsh-gateway-confirm',
+              label: t('confirmPassword'),
+              autoComplete: 'new-password',
+              value: form.confirm,
+              onChange: (value) => setForm({ ...form, confirm: value })
+            }),
+            React.createElement('div', { className: 'dshGatewayActions' },
+              React.createElement(Button, {
+                type: 'submit',
+                size: 'sm',
+                variant: 'primary',
+                disabled: busyNow
+              }, t('changePassword'))
+            )
+          ),
+          React.createElement('div', { className: 'dshGatewayField' },
+            React.createElement('span', { className: 'dshGatewayLabel' }, t('logoutAll')),
+            React.createElement('p', { className: 'dshGatewayHint' }, t('logoutAllDesc')),
+            React.createElement('div', { className: 'dshGatewayActions' },
+              React.createElement(Button, {
+                size: 'sm',
+                variant: 'outline',
+                disabled: busyNow,
+                onClick: () => { void logoutAll() }
+              }, t('logoutAll'))
+            )
+          )
+        ),
+        React.createElement('section', { className: 'dshGatewaySection' },
+          React.createElement('h3', { className: 'dshGatewayHeading' }, t('status')),
+          React.createElement('dl', { className: 'dshGatewayRows' },
+            React.createElement(StatusFact, { label: t('listen'), value: `${state.listen.host}:${String(state.listen.port)}` }),
+            React.createElement(StatusFact, { label: t('upstream'), value: `${state.upstream.host}:${String(state.upstream.port)}` }),
+            React.createElement(StatusFact, { label: t('sessions'), value: String(state.sessions) }),
+            React.createElement(StatusFact, { label: t('uptime'), value: formatUptime(state.uptimeMs, t) }),
+            React.createElement(StatusFact, { label: t('version'), value: state.version }),
+            React.createElement(StatusFact, { label: t('dataDir'), value: state.dataDir })
+          )
+        ),
+        error === '' ? null : React.createElement('p', { className: 'dshGatewayMessage dshGatewayError', role: 'alert' }, error),
+        notice === '' ? null : React.createElement('p', { className: 'dshGatewayMessage dshGatewayNotice', role: 'status' }, notice)
         )
       )
     }
 
     const inject = ['slots', 'locale']
+    const ROW_KEY = '@gitsang/dsh-gateway#gateway'
 
     function apply(ctx) {
-      const t = ctx.locale.bind(NS)
       ctx.effect(
         () => ctx.locale.register(NS, { zh, en }),
         'gateway: dictionaries'
       )
-
-      ctx.slots.inject('settings.section', () => ctx.slots.register(
+      ctx.slots.inject('plugins.row.config', () => ctx.slots.register(
         {
-          name: 'settings.section',
-          id: 'gateway',
-          order: 50,
-          label: () => t('nav'),
+          name: 'plugins.row.config',
+          key: ROW_KEY,
           locale: NS
         },
-        (props) => React.createElement(GatewaySettingsView, { ...props, t })
+        GatewayConfig
       ))
     }
 
     exports.apply = apply
     exports.inject = inject
+    exports.__test = { formatUptime, GatewayConfig, ROW_KEY }
     return module.exports
   }
 })

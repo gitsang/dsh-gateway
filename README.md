@@ -62,21 +62,14 @@ all use `dsh-gateway` / `gateway`.
 A `~/.dsh/profiles/gateway/.gitignore` is created on first run to keep
 `auth.json`, `session.json` and `settings.json` out of git.
 
-## Settings → Gateway
+## Gateway configuration page
 
-The plugin page keeps **one row** for the whole gateway. PWA and Host mode are
-not qol-style independently loadable components: they share the proxy
-lifecycle, and authentication/forwarding must never become an independently
-switchable item. Instead, the features and their status live on a dedicated
-settings page:
-
-```text
-设置
-├─ 通用
-├─ 模型
-├─ ...
-└─ 网关
-```
+The bundle keeps **one row** for the whole gateway. PWA and Host mode are not
+qol-style independently loadable components: they share the proxy lifecycle,
+and authentication/forwarding must never become an independently switchable
+item. Instead, the features and their status live on the row's own page under
+**Plugins → @gitsang/dsh-gateway → Gateway → Configure**. Nothing is injected
+into Settings.
 
 The page contains:
 
@@ -89,14 +82,15 @@ The page contains:
 - **兼容性** — Host mode switch, with the security warning and restart
   requirement stated inline.
 
-PWA changes take effect on the next page request. Host mode requires a restart
-of `dsh web`, because dsh's index injection is composed during boot. Settings
-saved on this page live in `settings.json`; they deliberately do not use dsh's
+Saving the form stages both switches and writes on **Save**. PWA changes take
+effect on the next page request. Host mode requires a restart of `dsh web`,
+because dsh's index injection is composed during boot. Settings saved on this
+page live in `settings.json`; they deliberately do not use dsh's
 own settings store, because turning Host mode off removes the browser's
 Host-settings transport and the gateway page must still be able to turn it back
 on.
 
-Environment variables win over the settings page. When a toggle is managed by
+Environment variables win over the configuration page. When a toggle is managed by
 an environment variable, the page shows it as read-only.
 
 The settings API is authenticated by the same gateway session cookie. Mutating
@@ -142,7 +136,7 @@ All configuration is optional and read from environment variables at boot.
 
 PWA injection is enabled by default. The gateway serves the manifest, service
 worker and `/favicon.svg` itself, and injects the required tags into the login
-page and proxied HTML responses. Toggle it on **Settings → Gateway**, or set
+page and proxied HTML responses. Toggle it on the gateway's **Configure** page, or set
 `DSH_GATEWAY_PWA=0` to lock it off from the environment.
 
 The service worker uses two caches:
@@ -209,7 +203,7 @@ Host mode carries the flag two ways:
    somewhere else.
 
 It is **on by default**, because a remote dsh web UI is otherwise unable to
-edit providers. Toggle it on **Settings → Gateway**, or set
+edit providers. Toggle it on the gateway's **Configure** page, or set
 `DSH_GATEWAY_HOST_MODE=0`. A change requires restarting `dsh web`.
 
 Injection needs the upstream HTML uncompressed, so for HTML navigation
@@ -308,5 +302,5 @@ writes `cordis.patch.yml`), the "open configuration file" action, and
 installing or enabling plugin bundles. Since a plugin bundle is code the Host
 loads, anyone who can sign in can effectively run code on this machine. Keep
 Host mode on only where every account with the password is trusted to do that,
-and turn it off on **Settings → Gateway** (or with
+and turn it off on the gateway's **Configure** page (or with
 `DSH_GATEWAY_HOST_MODE=0`) otherwise.

@@ -4,28 +4,23 @@ import { networkInterfaces, homedir } from 'node:os'
 import { join } from 'node:path'
 import { Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { AuthStore, SessionStore } from './stores.js'
-import { parseCookies, proxyRequest, proxyUpgrade, targetAuthority } from './proxy.js'
-import { UpstreamAuth } from './upstream-auth.js'
-import { readFormBody, renderLoginPage, safeNext } from './pages.js'
+import { dshCookieName, probeBrowserSession, proxyRequest, proxyUpgrade, targetAuthority } from './proxy.js'
+import { readRequestBody } from './pages.js'
 import { ICON_SVG, MANIFEST, SW_DISABLED_JS, SW_JS } from './pwa.js'
 import { GatewaySettingsStore } from './settings-store.js'
 
 export const name = 'gateway'
-// `connection` is optional: the gateway must still boot when a composition
-// omits the browser transport, it just cannot redeem a dsh session then.
+// `connection` is optional: the gateway still proxies when a composition omits
+// the browser transport, it just cannot print a tokenized sign-in URL then.
 export const inject = ['webServer']
 
-export const COOKIE_NAME = 'dsh_gateway_session'
 export const GATEWAY_API_PREFIX = '/__dsh_gateway'
-const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8')
 ).version
 
 const HOST_ENV = ['DSH_GATEWAY_HOST']
 const PORT_ENV = ['DSH_GATEWAY_PORT']
-const TTL_ENV = ['DSH_GATEWAY_TTL_MS']
 const DATA_DIR_ENV = ['DSH_GATEWAY_DATA_DIR']
 const PWA_ENV = ['DSH_GATEWAY_PWA']
 const HOST_MODE_ENV = ['DSH_GATEWAY_HOST_MODE']
@@ -77,14 +72,13 @@ export const Config = z.object({
   // The default port is derived from the dsh web port at startup; this env
   // var only overrides it when explicitly set.
   port: z.natural().max(65535).default(envInt(PORT_ENV)),
-  ttlMs: z.natural().min(1).default(envInt(TTL_ENV, DEFAULT_TTL_MS)),
   dataDir: z.string().default(defaultDataDir()),
   pwa: z.boolean().default(envBool(PWA_ENV, true)),
   // Declare the proxied page as a host-owning page so dsh uses Host settings
   // (Models page, "open configuration file") instead of its read-only memory
   // fallback. On by default because a remote dsh web UI is unusable without it;
   // it does hand every signed-in user the same configuration-write surface the
-  // Desktop shell has, so the Settings > Gateway page can turn it off.
+  // Desktop shell has, so the settings page can turn it off.
   hostMode: z.boolean().default(envBool(HOST_MODE_ENV, true))
 })
 
@@ -108,8 +102,6 @@ class DshGateway extends Service {
   constructor(ctx, config) {
     super(ctx, 'gateway')
     this.config = config
-    this.auth = new AuthStore(join(config.dataDir, 'auth.json'))
-    this.sessions = new SessionStore(join(config.dataDir, 'session.json'), config.ttlMs)
     this.settings = new GatewaySettingsStore(join(config.dataDir, 'settings.json'))
     this.envOverrides = {
       pwa: envBoolOverride(PWA_ENV),
@@ -123,11 +115,10 @@ class DshGateway extends Service {
     this.server = null
     this.proxyPort = null
     this.sockets = new Set()
-    this.upstreamAuth = null
   }
 
   async [Service.init]() {
-    await Promise.all([this.auth.init(), this.sessions.init(), this.settings.init()])
+    await this.settings.init()
 
     const saved = this.settings.snapshot()
     this.runtimePwa = this.envOverrides.pwa ?? saved.pwa ?? this.config.pwa
@@ -137,15 +128,6 @@ class DshGateway extends Service {
 
     const target = upstreamTarget(this.ctx.webServer)
     this.target = target
-    // dsh mints its browser-session cookie for the authority a request arrives
-    // on, and only hands that cookie out through a per-process launch token on
-    // `GET /`. Proxied requests always present the loopback upstream authority,
-    // so that is the one authority for which we redeem and cache a cookie.
-    this.upstreamAuth = new UpstreamAuth(
-      target,
-      (authority) => this.tokenizedUrl(authority),
-      this.ctx.logger
-    )
     // The gateway listens next to dsh web by default (web port + 1).
     // DSH_GATEWAY_PORT can still override this.
     this.config = { ...this.config, port: this.config.port ?? Number(target.port) + 1 }
@@ -207,16 +189,21 @@ class DshGateway extends Service {
     }
 
     this.printUrl(target)
+
+    // Connection mounts after this row in the shipped web composition, so the
+    // launch token only exists once that service appears. Waiving readiness is
+    // safe: this is a log line, not part of serving traffic.
+    this.ctx.inject(['connection'], () => {
+      this.printSignInUrl(target)
+    })
   }
 
   /**
    * A tokenized application URL for the loopback `authority`, from dsh's
-   * Connection service.
-   *
-   * dsh builds this URL from its own loopback address, which is also the
-   * authority every proxied request presents upstream. When Connection is
-   * absent the gate still works for the password layer, but dsh itself will
-   * answer 401 — exactly as it did before this custodian existed.
+   * Connection service. dsh exchanges that token for its own signed cookie on
+   * `GET /`, and the exchange also works through this proxy: the gateway
+   * forwards `Host` as loopback, which is exactly the authority dsh binds the
+   * cookie to.
    */
   tokenizedUrl(authority) {
     const connection = this.ctx.get('connection')
@@ -224,35 +211,9 @@ class DshGateway extends Service {
     return connection.authenticatedUrl(`http://${authority}/`)
   }
 
-  getSession(req) {
-    const cookies = parseCookies(req.headers.cookie)
-    const token = cookies[COOKIE_NAME]
-    if (token === undefined || token === '') return undefined
-    return this.sessions.get(token)
-  }
-
   async handle(req, res, target) {
     const url = new URL(req.url ?? '/', 'http://dsh-gateway.invalid')
     const pathname = url.pathname
-
-    if (pathname === '/login') {
-      if (req.method === 'GET') {
-        await this.serveLoginPage(req, res)
-        return
-      }
-      if (req.method === 'POST') {
-        await this.handleLoginPost(req, res)
-        return
-      }
-      res.writeHead(405, { allow: 'GET, POST' })
-      res.end()
-      return
-    }
-
-    if (pathname === '/logout') {
-      await this.handleLogout(req, res)
-      return
-    }
 
     // The PWA worker must remain reachable when PWA support is switched off so
     // an already-installed worker can be updated into its cleanup version.
@@ -287,72 +248,24 @@ class DshGateway extends Service {
       return
     }
 
-    // If auth.json was deleted (forgot-password reset), never fall through on
-    // a leftover session cookie: force the setup flow again.
-    if (!this.auth.hasPassword()) {
-      this.deny(req, res)
-      return
-    }
-
-    const session = this.getSession(req)
     if (pathname === GATEWAY_API_PREFIX || pathname.startsWith(`${GATEWAY_API_PREFIX}/`)) {
-      if (session === undefined) {
-        this.denyApi(res)
+      // The settings page is reachable only to a browser dsh already accepts;
+      // there is no gateway-owned session to check instead.
+      if (!(await probeBrowserSession(target, req.headers.cookie))) {
+        this.sendJson(res, 401, { error: 'unauthorized' })
         return
       }
-      this.sessions.touch(session.token)
-      await this.handleGatewayApi(req, res, pathname, session)
+      await this.handleGatewayApi(req, res, pathname)
       return
     }
 
-    if (session !== undefined) {
-      this.sessions.touch(session.token)
-      // The browser-facing Host is rewritten to this authority by proxy.js, so
-      // the dsh session cookie must be minted for the same loopback authority.
-      const authority = targetAuthority(target)
-      const cookie = await this.upstreamAuth.cookieFor(authority)
-      await proxyRequest(req, res, target, {
-        pwa: this.runtimePwa,
-        hostMode: this.bootHostMode,
-        sessionCookie: cookie,
-        // dsh rejected the cookie we cached (expired, or it restarted with a
-        // new launch token). Redeem a fresh one and let the proxy retry.
-        reauthorize: () => this.reauthorize(authority)
-      })
-      return
-    }
-
-    this.deny(req, res)
-  }
-
-  /**
-   * Replace a rejected cookie: drop the stale entry and redeem a fresh one for
-   * the same authority. `refresh` coalesces concurrent callers, so a page load
-   * whose requests all trip the stale cookie performs one token exchange.
-   */
-  async reauthorize(authority) {
-    this.upstreamAuth.forget(authority)
-    return this.upstreamAuth.refresh(authority)
-  }
-
-  deny(req, res) {
-    const url = new URL(req.url ?? '/', 'http://dsh-gateway.invalid')
-    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
-      this.denyApi(res)
-      return
-    }
-
-    const next = encodeURIComponent(req.url ?? '/')
-    res.writeHead(302, { location: `/login?next=${next}` })
-    res.end()
-  }
-
-  denyApi(res) {
-    res.writeHead(401, {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store'
+    // Everything else is dsh's request. The gateway translates identity to
+    // loopback and relays; dsh's own cookie decides whether the browser is
+    // authenticated.
+    await proxyRequest(req, res, target, {
+      pwa: this.runtimePwa,
+      hostMode: this.bootHostMode
     })
-    res.end(JSON.stringify({ error: 'unauthorized' }))
   }
 
   settingSource(key) {
@@ -367,10 +280,14 @@ class DshGateway extends Service {
       version: PACKAGE_VERSION,
       listen: { host: this.config.host, port: this.proxyPort },
       upstream: { host: this.target.host, port: this.target.port },
-      sessions: this.sessions.size(),
       uptimeMs: Date.now() - this.startedAt,
-      hasPassword: this.auth.hasPassword(),
       dataDir: this.config.dataDir,
+      auth: {
+        provider: 'dsh',
+        // dsh's cookie name is a deterministic hash of the authority it was
+        // minted for; the gateway always forwards the loopback authority.
+        cookieName: dshCookieName(targetAuthority(this.target))
+      },
       pwa: {
         value: this.runtimePwa,
         source: this.settingSource('pwa'),
@@ -395,7 +312,7 @@ class DshGateway extends Service {
   }
 
   async readJsonBody(req) {
-    const raw = await readFormBody(req)
+    const raw = await readRequestBody(req)
     if (raw === '') return {}
     return JSON.parse(raw)
   }
@@ -411,7 +328,14 @@ class DshGateway extends Service {
     return site === undefined || site === 'same-origin' || site === 'none'
   }
 
-  async handleGatewayApi(req, res, pathname, session) {
+  /** The browser-facing origin uses HTTPS? */
+  isSecureRequest(req) {
+    const proto = req.headers['x-forwarded-proto']
+    if (typeof proto === 'string' && proto !== '') return proto.split(',', 1)[0].trim() === 'https'
+    return false
+  }
+
+  async handleGatewayApi(req, res, pathname) {
     if (pathname === `${GATEWAY_API_PREFIX}/state` && req.method === 'GET') {
       this.sendJson(res, 200, this.gatewayState())
       return
@@ -424,6 +348,11 @@ class DshGateway extends Service {
     }
     if (!this.isTrustedApiRequest(req)) {
       this.sendJson(res, 403, { error: 'forbidden' })
+      return
+    }
+
+    if (pathname === `${GATEWAY_API_PREFIX}/logout`) {
+      this.signOut(req, res)
       return
     }
 
@@ -440,23 +369,27 @@ class DshGateway extends Service {
       return
     }
 
-    if (pathname === `${GATEWAY_API_PREFIX}/password`) {
-      await this.changePassword(res, body, session)
-      return
-    }
-
-    if (pathname === `${GATEWAY_API_PREFIX}/logout-all`) {
-      const revoked = await this.sessions.deleteAll()
-      res.writeHead(200, {
-        'content-type': 'application/json; charset=utf-8',
-        'cache-control': 'no-store',
-        'set-cookie': `${COOKIE_NAME}=`
-      })
-      res.end(JSON.stringify({ ok: true, revoked }))
-      return
-    }
-
     this.sendJson(res, 404, { error: 'not found' })
+  }
+
+  /**
+   * End this browser's dsh session by expiring the cookie dsh minted.
+   *
+   * dsh has no logout endpoint — its documented model is "clearing the browser
+   * cookie ends one browser session" — so the gateway does exactly that for the
+   * one cookie name it knows, the loopback authority's. Other browsers are
+   * unaffected; revoking every session needs deleting dsh's
+   * `client-connection/browser-session` credential and restarting dsh.
+   */
+  signOut(req, res) {
+    const name = dshCookieName(targetAuthority(this.target))
+    const secure = this.isSecureRequest(req) ? '; Secure' : ''
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'set-cookie': `${name}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict${secure}`
+    })
+    res.end(JSON.stringify({ ok: true }))
   }
 
   async updateGatewaySettings(res, body) {
@@ -487,122 +420,43 @@ class DshGateway extends Service {
     this.sendJson(res, 200, this.gatewayState())
   }
 
-  async changePassword(res, body, session) {
-    const currentPassword = typeof body?.currentPassword === 'string' ? body.currentPassword : ''
-    const newPassword = typeof body?.newPassword === 'string' ? body.newPassword : ''
-    const confirm = typeof body?.confirm === 'string' ? body.confirm : ''
-    if (newPassword === '') {
-      this.sendJson(res, 400, { error: '新密码不能为空。' })
-      return
-    }
-    if (newPassword !== confirm) {
-      this.sendJson(res, 400, { error: '两次输入的新密码不一致。' })
-      return
-    }
-    if (!(await this.auth.verify(currentPassword))) {
-      this.sendJson(res, 401, { error: '当前密码错误。' })
-      return
-    }
-    await this.auth.setPassword(newPassword)
-    const revoked = await this.sessions.deleteAll(session.token)
-    this.sendJson(res, 200, { ok: true, revoked })
-  }
-
-  async serveLoginPage(req, res, options = {}) {
-    const setup = !this.auth.hasPassword()
-    const next = safeNext(new URL(req.url ?? '/', 'http://dsh-gateway.invalid').searchParams.get('next') ?? '/')
-    const html = renderLoginPage({
-      setup,
-      next,
-      error: options.error,
-      pwa: this.runtimePwa
-    })
-    res.writeHead(options.status ?? 200, {
-      'content-type': 'text/html; charset=utf-8',
-      'cache-control': 'no-store'
-    })
-    res.end(html)
-  }
-
-  async handleLoginPost(req, res) {
-    let body
-    try {
-      body = await readFormBody(req)
-    } catch {
-      res.writeHead(413, { 'content-type': 'text/plain; charset=utf-8' })
-      res.end('dsh-gateway: request body too large')
-      return
-    }
-
-    const params = new URLSearchParams(body)
-    const password = params.get('password') ?? ''
-    const confirm = params.get('confirm')
-    const next = safeNext(params.get('next') ?? '/')
-    const setup = !this.auth.hasPassword()
-
-    if (setup) {
-      if (password.length === 0) {
-        await this.serveLoginPage(req, res, { status: 400, error: '请输入密码。' })
-        return
-      }
-      if (password !== confirm) {
-        await this.serveLoginPage(req, res, { status: 400, error: '两次输入的密码不一致。' })
-        return
-      }
-      await this.auth.setPassword(password)
-    } else {
-      const valid = await this.auth.verify(password)
-      if (!valid) {
-        await this.serveLoginPage(req, res, { status: 401, error: '密码错误。' })
-        return
-      }
-    }
-
-    const token = await this.sessions.create()
-    res.writeHead(302, {
-      location: next,
-      'set-cookie': `${COOKIE_NAME}=${token}`
-    })
-    res.end()
-  }
-
-  async handleLogout(req, res) {
-    const cookies = parseCookies(req.headers.cookie)
-    const token = cookies[COOKIE_NAME]
-    if (token !== undefined && token !== '') await this.sessions.delete(token)
-
-    res.writeHead(302, {
-      location: '/login',
-      'set-cookie': `${COOKIE_NAME}=`
-    })
-    res.end()
-  }
-
   async handleUpgrade(req, socket, head, target) {
-    const session = this.getSession(req)
-    if (session === undefined) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 12\r\n\r\nunauthorized')
-      socket.destroy()
-      return
-    }
-    this.sessions.touch(session.token)
-    const authority = targetAuthority(target)
-    const cookie = await this.upstreamAuth.cookieFor(authority)
-    proxyUpgrade(req, socket, head, target, { sessionCookie: cookie })
+    proxyUpgrade(req, socket, head, target)
   }
 
   printUrl(target) {
     const host = this.config.host === '0.0.0.0' ? '127.0.0.1' : this.config.host
     const lan = this.config.host === '0.0.0.0' ? lanAddresses()[0] : undefined
     const lanText = lan === undefined ? '' : ` (LAN: http://${lan}:${String(this.proxyPort)})`
-    console.log(`dsh-gateway: http://${host}:${String(this.proxyPort)} -> http://${target.host}:${String(target.port)}${lanText}`)
+    const base = `http://${host}:${String(this.proxyPort)}`
+    console.log(`dsh-gateway: ${base} -> http://${target.host}:${String(target.port)}${lanText}`)
     if (this.bootHostMode) {
       console.log('dsh-gateway: host mode is ON — every signed-in user can edit this profile\'s settings and plugins')
     }
   }
 
+  /**
+   * Print the one URL that signs a browser in.
+   *
+   * The gateway owns no credential: authentication is dsh's launch token,
+   * exchanged for dsh's own signed cookie. dsh only accepts that token on
+   * `GET /`, and the exchange works through this proxy because the gateway
+   * forwards `Host` as the loopback authority dsh binds the cookie to. Rewriting
+   * dsh's URL to the gateway port is therefore all that is needed.
+   */
+  printSignInUrl(target) {
+    const tokenized = this.tokenizedUrl(targetAuthority(target))
+    const token = tokenized === undefined ? undefined : new URL(tokenized).searchParams.get('token')
+    if (token === undefined || token === '') {
+      console.log('dsh-gateway: open the tokenized URL printed by dsh web to sign in through this gateway')
+      return
+    }
+    const host = this.config.host === '0.0.0.0' ? '127.0.0.1' : this.config.host
+    const urlHost = host.includes(':') ? `[${host}]` : host
+    console.log(`dsh-gateway: sign in with http://${urlHost}:${String(this.proxyPort)}/?token=${encodeURIComponent(token)}`)
+  }
+
   async close() {
-    await this.sessions.close()
     if (this.server !== null) {
       this.server.closeAllConnections?.()
       for (const socket of this.sockets) socket.destroy()

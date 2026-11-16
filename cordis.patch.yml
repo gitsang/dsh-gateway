@@ -1,8 +1,12 @@
 # dsh-gateway bundle patch.
 #
-# Adds one gateway row beside the dsh web server: an authenticated reverse
-# proxy that also delivers the installable PWA shell and Host-mode transport
-# declaration. One row means one lifecycle and one switch on the Plugins page.
+# Adds one gateway row beside the dsh web server: a reverse proxy that relays
+# dsh's own token authentication and also delivers the installable PWA shell and
+# Host-mode transport declaration. One row means one lifecycle and one switch on
+# the Plugins page.
+#
+# `connection` is optional: without the browser transport the gateway still
+# proxies, it just cannot print a tokenized sign-in URL.
 - insert:
     - id: gateway
       name: '@gitsang/dsh-gateway'

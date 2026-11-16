@@ -5,7 +5,10 @@
  * on that Plugins row instead of inside Settings; PWA delivery and Host-mode
  * injection share the proxy lifecycle and must never be turned off
  * independently of access. The page therefore exposes the two safe modes,
- * gateway status, and access operations.
+ * gateway status, and the sign-out/sign-in story.
+ *
+ * The gateway itself owns no credential: dsh's launch token and signed cookie
+ * are the only authentication, so this page has no password form.
  *
  * The form uses the same SettingsForm/field/switch primitives and the same
  * section rhythm as the official plugin configuration pages.
@@ -31,7 +34,6 @@ window.__ModuleLoader__.load({
       status: '运行状态',
       listen: '监听地址',
       upstream: '上游 dsh',
-      sessions: '有效会话',
       uptime: '运行时长',
       version: '版本',
       dataDir: '数据目录',
@@ -42,14 +44,13 @@ window.__ModuleLoader__.load({
       cacheCleared: '已清除网关离线缓存。',
       cacheUnsupported: '当前浏览器不支持 Cache Storage。',
       access: '访问控制',
-      currentPassword: '当前密码',
-      newPassword: '新密码',
-      confirmPassword: '确认新密码',
-      changePassword: '修改密码',
-      passwordChanged: '密码已更新，其他设备已退出登录。',
-      logoutAll: '退出所有设备',
-      logoutAllDesc: '撤销全部会话，包括当前浏览器。',
-      logoutAllConfirm: '确定要退出所有设备吗？',
+      authProvider: '认证方式',
+      authProviderValue: 'dsh launch token',
+      cookieName: '会话 Cookie',
+      signOut: '退出登录',
+      signOutDesc: '清除本浏览器持有的 dsh 会话 Cookie。dsh 没有登出接口，撤销全部会话需要删除凭据记录并重启 dsh。',
+      signOutConfirm: '确定要退出登录吗？',
+      signInHint: '登录入口是 dsh 启动时打印的带 ?token= 的链接。',
       advanced: '兼容性',
       hostModeTitle: 'Host mode 注入',
       hostModeDesc: '允许 dsh 页面编辑 Host 设置、模型配置和插件。需要重启 dsh 后生效。',
@@ -82,7 +83,6 @@ window.__ModuleLoader__.load({
       status: 'Status',
       listen: 'Listening on',
       upstream: 'Upstream dsh',
-      sessions: 'Active sessions',
       uptime: 'Uptime',
       version: 'Version',
       dataDir: 'Data directory',
@@ -93,14 +93,13 @@ window.__ModuleLoader__.load({
       cacheCleared: 'Gateway offline caches cleared.',
       cacheUnsupported: 'This browser does not support Cache Storage.',
       access: 'Access control',
-      currentPassword: 'Current password',
-      newPassword: 'New password',
-      confirmPassword: 'Confirm new password',
-      changePassword: 'Change password',
-      passwordChanged: 'Password updated. Other devices were signed out.',
-      logoutAll: 'Sign out everywhere',
-      logoutAllDesc: 'Revoke every session, including this browser.',
-      logoutAllConfirm: 'Sign out of every device?',
+      authProvider: 'Authentication',
+      authProviderValue: 'dsh launch token',
+      cookieName: 'Session cookie',
+      signOut: 'Sign out',
+      signOutDesc: 'Clears the dsh session cookie this browser holds. dsh has no logout endpoint; revoking every session means deleting its credential record and restarting dsh.',
+      signOutConfirm: 'Sign out of this browser?',
+      signInHint: 'Sign in by opening the tokenized URL dsh printed at startup.',
       advanced: 'Compatibility',
       hostModeTitle: 'Host mode injection',
       hostModeDesc: 'Lets the dsh page edit Host settings, model configuration and plugins. Requires a dsh restart.',
@@ -143,10 +142,6 @@ window.__ModuleLoader__.load({
       '.dshGatewayHint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
       '.dshGatewayWarning{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-state-error-primary)}',
       '.dshGatewayActions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}',
-      '.dshGatewayForm{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:end}',
-      '@media(max-width:680px){.dshGatewayForm{grid-template-columns:1fr}}',
-      '.dshGatewayInput{box-sizing:border-box;width:100%;height:34px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:1.5}',
-      '.dshGatewayInput:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}',
       '.dshGatewayMessage{margin:0;font-size:12px;line-height:1.5}',
       '.dshGatewayError{color:var(--dsw-alias-state-error-primary)}',
       '.dshGatewayNotice{color:var(--dsw-alias-label-tertiary)}',
@@ -223,20 +218,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function PasswordInput({ id, label, autoComplete, value, onChange }) {
-      return React.createElement('div', { className: 'dshGatewayField' },
-        React.createElement('label', { className: 'dshGatewayLabel', htmlFor: id }, label),
-        React.createElement('input', {
-          id,
-          className: 'dshGatewayInput',
-          type: 'password',
-          autoComplete,
-          value,
-          onChange: (event) => onChange(event.target.value)
-        })
-      )
-    }
-
     function GatewayConfig({ view, t }) {
       const [state, setState] = React.useState(null)
       const [staged, setStaged] = React.useState(null)
@@ -245,7 +226,6 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState('')
       const [saving, setSaving] = React.useState(false)
       const [saveFailed, setSaveFailed] = React.useState(false)
-      const [form, setForm] = React.useState({ currentPassword: '', newPassword: '', confirm: '' })
 
       const applyState = React.useCallback((next) => {
         setState(next)
@@ -326,30 +306,14 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function changePassword(event) {
-        event.preventDefault()
-        setBusy('password')
-        setError('')
-        setNotice('')
-        try {
-          await request('/password', { method: 'POST', body: JSON.stringify(form) })
-          setForm({ currentPassword: '', newPassword: '', confirm: '' })
-          setNotice(t('passwordChanged'))
-          await refresh()
-        } catch (err) {
-          setError(err?.message || t('unknownError'))
-        } finally {
-          setBusy('')
-        }
-      }
-
-      async function logoutAll() {
-        if (!window.confirm(t('logoutAllConfirm'))) return
+      async function signOut() {
+        if (!window.confirm(t('signOutConfirm'))) return
         setBusy('logout')
         setError('')
         try {
-          await request('/logout-all', { method: 'POST', body: '{}' })
-          window.location.assign('/login')
+          await request('/logout', { method: 'POST', body: '{}' })
+          await dropOfflineShell()
+          window.location.assign('/')
         } catch (err) {
           setError(err?.message || t('unknownError'))
           setBusy('')
@@ -429,47 +393,21 @@ window.__ModuleLoader__.load({
         ),
         React.createElement('section', { className: 'dshGatewaySection' },
           React.createElement('h3', { className: 'dshGatewayHeading' }, t('access')),
-          React.createElement('form', { className: 'dshGatewayForm', onSubmit: changePassword },
-            React.createElement(PasswordInput, {
-              id: 'dsh-gateway-current',
-              label: t('currentPassword'),
-              autoComplete: 'current-password',
-              value: form.currentPassword,
-              onChange: (value) => setForm({ ...form, currentPassword: value })
-            }),
-            React.createElement(PasswordInput, {
-              id: 'dsh-gateway-new',
-              label: t('newPassword'),
-              autoComplete: 'new-password',
-              value: form.newPassword,
-              onChange: (value) => setForm({ ...form, newPassword: value })
-            }),
-            React.createElement(PasswordInput, {
-              id: 'dsh-gateway-confirm',
-              label: t('confirmPassword'),
-              autoComplete: 'new-password',
-              value: form.confirm,
-              onChange: (value) => setForm({ ...form, confirm: value })
-            }),
-            React.createElement('div', { className: 'dshGatewayActions' },
-              React.createElement(Button, {
-                type: 'submit',
-                size: 'sm',
-                variant: 'primary',
-                disabled: busyNow
-              }, t('changePassword'))
-            )
+          React.createElement('dl', { className: 'dshGatewayRows' },
+            React.createElement(StatusFact, { label: t('authProvider'), value: t('authProviderValue') }),
+            React.createElement(StatusFact, { label: t('cookieName'), value: state.auth.cookieName })
           ),
           React.createElement('div', { className: 'dshGatewayField' },
-            React.createElement('span', { className: 'dshGatewayLabel' }, t('logoutAll')),
-            React.createElement('p', { className: 'dshGatewayHint' }, t('logoutAllDesc')),
+            React.createElement('span', { className: 'dshGatewayLabel' }, t('signOut')),
+            React.createElement('p', { className: 'dshGatewayHint' }, t('signOutDesc')),
+            React.createElement('p', { className: 'dshGatewayHint' }, t('signInHint')),
             React.createElement('div', { className: 'dshGatewayActions' },
               React.createElement(Button, {
                 size: 'sm',
                 variant: 'outline',
                 disabled: busyNow,
-                onClick: () => { void logoutAll() }
-              }, t('logoutAll'))
+                onClick: () => { void signOut() }
+              }, t('signOut'))
             )
           )
         ),
@@ -478,7 +416,6 @@ window.__ModuleLoader__.load({
           React.createElement('dl', { className: 'dshGatewayRows' },
             React.createElement(StatusFact, { label: t('listen'), value: `${state.listen.host}:${String(state.listen.port)}` }),
             React.createElement(StatusFact, { label: t('upstream'), value: `${state.upstream.host}:${String(state.upstream.port)}` }),
-            React.createElement(StatusFact, { label: t('sessions'), value: String(state.sessions) }),
             React.createElement(StatusFact, { label: t('uptime'), value: formatUptime(state.uptimeMs, t) }),
             React.createElement(StatusFact, { label: t('version'), value: state.version }),
             React.createElement(StatusFact, { label: t('dataDir'), value: state.dataDir })

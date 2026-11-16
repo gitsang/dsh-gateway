@@ -22,9 +22,12 @@ export const MANIFEST = {
 
 /**
  * The PWA service worker: a network-first shell plus a cache-first store for
- * immutable assets. It never caches API traffic, login pages, auth redirects
- * or responses marked `no-store`. WebSocket upgrades are never seen by a
- * service worker, so the proxy upgrade path is unaffected.
+ * immutable assets. It never caches API traffic, the gateway's own settings
+ * API, dsh's token exchange and auth redirects, or responses marked
+ * `no-store`. A 401 on a navigation also drops the cached shell, so signing out
+ * does not leave the authenticated document available offline. WebSocket
+ * upgrades are never seen by a service worker, so the proxy upgrade path is
+ * unaffected.
  */
 export const SW_JS = `
 const CACHE_PREFIX = 'dsh-gateway-';
@@ -120,6 +123,15 @@ async function networkFirstNavigation(event, request) {
   const cache = await caches.open(SHELL_CACHE);
   const cached = await cache.match(request);
   const network = fetch(request).then(async (response) => {
+    // dsh rejected the browser's cookie: its session ended, so the cached
+    // authenticated document must not stay available offline.
+    if (response.status === 401) {
+      try {
+        const keys = await cache.keys();
+        await Promise.all(keys.map((key) => cache.delete(key)));
+      } catch (error) {}
+      return response;
+    }
     if (canStoreDocument(response)) {
       try { await cache.put(request, response.clone()); } catch (error) {}
     }
@@ -154,7 +166,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
   if (request.headers.has('range')) return;
-  if (url.pathname === '/sw.js' || url.pathname === '/login' || url.pathname === '/logout' || url.pathname === '/connect') return;
+  if (url.pathname === '/sw.js' || url.pathname === '/connect') return;
+  if (url.pathname === '/__dsh_gateway' || url.pathname.startsWith('/__dsh_gateway/')) return;
   if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return;
   if (request.mode === 'navigate') {
     event.respondWith(networkFirstNavigation(event, request));
@@ -208,8 +221,8 @@ export const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="ht
 </svg>`
 
 /**
- * Injected into the head of the login page and proxied text/html responses.
- * The comment is an idempotency marker for injectPwaTags().
+ * Injected into the head of the standalone 401 page and proxied text/html
+ * responses. The comment is an idempotency marker for injectPwaTags().
  */
 export const PWA_HEAD_TAGS = `
 <!-- dsh-gateway-pwa -->
@@ -217,18 +230,6 @@ export const PWA_HEAD_TAGS = `
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta name="theme-color" content="#0f1115">
 <script>
-  if (window.location.pathname === '/login' && 'caches' in window) {
-    caches.has('dsh-gateway-shell-v1').then(function (exists) {
-      if (!exists) return;
-      return caches.open('dsh-gateway-shell-v1').then(function (cache) {
-        return cache.keys().then(function (keys) {
-          return Promise.all(keys.filter(function (key) {
-            return key.destination === 'document' || new URL(key.url).pathname === '/';
-          }).map(function (key) { return cache.delete(key); }));
-        });
-      });
-    }).catch(function () {});
-  }
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () {
       navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(function () {});

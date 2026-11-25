@@ -8,9 +8,10 @@ the `web` profile: a gateway that starts beside `dsh web`, reverse proxies HTTP
 and WebSocket traffic to it, relays dsh's own token authentication, and can
 deliver the page as an installable PWA.
 
-Authentication is **dsh's**, not the gateway's. The gateway owns no password,
-no session store and no credential of its own: it forwards the signed cookie
-dsh minted and lets dsh decide.
+Authentication is **dsh's**, not the gateway's. The gateway owns no password
+and no session store: it forwards the signed cookie dsh minted and lets dsh
+decide. Its one credential-related job is keeping the sign-in token stable
+across restarts (see [Long-lived sign-in token](#long-lived-sign-in-token)).
 
 ## Why "gateway"
 
@@ -25,7 +26,8 @@ The package, bundle row, environment prefix and data directory all use
 ## How authentication works
 
 dsh mints one random launch token per process and prints (and usually opens) its
-application URL with `?token=…`. `GET /?token=…` exchanges that token for a
+application URL with `?token=…` (the gateway replaces that per-process token
+with a persistent one; see below). `GET /?token=…` exchanges the token for a
 signed browser cookie and redirects to the clean `./`. The cookie is:
 
 - named `dsh-auth-<base64url sha256 of the request authority>`,
@@ -59,13 +61,39 @@ cookie. Sign in with the URL the gateway prints:
 
 ```
 dsh-gateway: http://127.0.0.1:3081 -> http://127.0.0.1:3080
-dsh-gateway: sign in with http://127.0.0.1:3081/?token=…
+dsh-gateway: sign in with http://127.0.0.1:3081/?token=… (stable across restarts)
 ```
 
-That URL is derived from dsh's own launch token, so it is only as secret as
-dsh's startup line. The token changes every time `dsh web` restarts; after a
-restart an existing browser keeps working while its cookie is valid, but a
-**new** browser needs the new URL.
+### Long-lived sign-in token
+
+dsh itself mints a fresh random launch token per process, which would force
+every new browser to fetch the new startup URL after each restart. The gateway
+installs a **persistent token** instead, so the sign-in URL above never changes
+and can be bookmarked or stored in a password manager:
+
+- By default the gateway generates one random 256-bit token on first run and
+  persists it to `~/.dsh/profiles/gateway/token.txt` (owner-only permissions,
+  git-ignored).
+- `DSH_GATEWAY_TOKEN` overrides it with a token you choose (at least 22
+  base64url characters, `[A-Za-z0-9_-]`). The env value is never written to
+  disk; removing the env falls back to the persisted/generated token.
+- **Rotate** by deleting `token.txt` (or changing the env value) and restarting
+  `dsh web`. The old URL stops working; browsers that already hold a cookie
+  keep working, because cookies are signed with dsh's separate persistent
+  secret, not the launch token.
+- Revoking every *cookie* is still dsh's operation: delete the
+  `client-connection/browser-session` record from `$DSH_HOME/.credentials.yaml`
+  and restart.
+
+Implementation note: dsh exposes no configuration for a stable token, so the
+gateway assigns its token to the Connection service's
+`browserAuth.launchToken` at boot and verifies through the public
+`authenticatedUrl()` that the assignment took effect. This is a deliberate
+dependency on a dsh internal. If a future dsh version moves that field, the
+gateway logs a warning and falls back to the stock behavior (a fresh token per
+restart, printed in the startup line) — sign-in keeps working either way. The
+configuration page shows which mode is active (**登录 Token**: 长期有效 /
+每次重启更换).
 
 ### Signing out
 
@@ -114,7 +142,7 @@ Revoking *every* session is dsh's own operation, not the gateway's:
   standalone web app on `localhost`/HTTPS.
 
 On first run the gateway creates a `~/.dsh/profiles/gateway/.gitignore` keeping
-`settings.json` out of git.
+`settings.json` and `token.txt` out of git.
 
 ## Gateway configuration page
 
@@ -131,8 +159,9 @@ The page contains:
   caches.
 - **兼容性** — Host mode switch, with the security warning and restart
   requirement stated inline.
-- **访问控制** — the authentication provider and exact cookie name, the
-  sign-in hint, and a **退出登录** button that expires this browser's cookie.
+- **访问控制** — the authentication provider, whether the sign-in token is
+  persistent, the exact cookie name, the sign-in hint, and a **退出登录**
+  button that expires this browser's cookie.
 - **运行状态** — listen address, upstream dsh, uptime, version and data
   directory.
 
@@ -196,6 +225,7 @@ All configuration is optional and read from environment variables at boot.
 | `DSH_GATEWAY_DATA_DIR`  | `~/.dsh/profiles/gateway` | Directory for gateway settings                        |
 | `DSH_GATEWAY_PWA`       | `1`                       | Serve PWA assets and inject PWA tags into HTML        |
 | `DSH_GATEWAY_HOST_MODE` | `1`                       | Declare the page a host-owning page (Host settings)   |
+| `DSH_GATEWAY_TOKEN`     | generated, persisted      | Fixed sign-in token (≥22 base64url chars); see above  |
 | `DSH_HOME`              | `~/.dsh`                  | dsh home (used when `DSH_GATEWAY_DATA_DIR` is unset)  |
 
 ### PWA (installable web app)
@@ -349,10 +379,13 @@ to provide:
   limit, and no per-device revocation; revoking means deleting dsh's
   `client-connection/browser-session` credential record and restarting dsh,
   which signs out everyone.
-- **The launch token appears in a startup line and in the URL.** Treat the
-  printed sign-in URL like a password, keep it out of logs and screenshots, and
-  remember that query strings can land in reverse-proxy access logs. The token
-  rotates on every `dsh web` restart.
+- **The sign-in token is a long-lived credential in a URL.** Treat the printed
+  sign-in URL like a password: keep it out of logs and screenshots, and remember
+  that query strings can land in reverse-proxy access logs. Unlike dsh's stock
+  per-process token, the gateway's persistent token does **not** rotate on
+  restart — a leaked URL stays valid until you rotate it (delete `token.txt` or
+  change `DSH_GATEWAY_TOKEN`, then restart). `token.txt` is written with
+  owner-only permissions.
 - **Cookies last 30 days.** dsh's `connection.cookieMaxAgeDays` controls that.
 - **Plain HTTP leaks the cookie in transit.** dsh sets `Secure` only on a TLS
   listener; behind a TLS proxy the gateway adds it, but the gateway-to-dsh hop

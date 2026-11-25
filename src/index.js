@@ -8,6 +8,7 @@ import { dshCookieName, probeBrowserSession, proxyRequest, proxyUpgrade, targetA
 import { readRequestBody } from './pages.js'
 import { ICON_SVG, MANIFEST, SW_DISABLED_JS, SW_JS } from './pwa.js'
 import { GatewaySettingsStore } from './settings-store.js'
+import { LaunchTokenStore } from './token-store.js'
 
 export const name = 'gateway'
 // `connection` is optional: the gateway still proxies when a composition omits
@@ -24,6 +25,7 @@ const PORT_ENV = ['DSH_GATEWAY_PORT']
 const DATA_DIR_ENV = ['DSH_GATEWAY_DATA_DIR']
 const PWA_ENV = ['DSH_GATEWAY_PWA']
 const HOST_MODE_ENV = ['DSH_GATEWAY_HOST_MODE']
+const TOKEN_ENV = ['DSH_GATEWAY_TOKEN']
 
 /** Read the first non-empty environment variable from a compatibility list. */
 function envValue(names) {
@@ -96,6 +98,40 @@ function lanAddresses() {
     .map((iface) => iface.address)
 }
 
+/**
+ * Replace dsh's per-process launch token with the gateway's persistent one.
+ *
+ * dsh keeps the token as a plain property on its Connection service's
+ * BrowserAuth (`connection.browserAuth.launchToken`); every consumer —
+ * `authenticatedUrl`, the index exchange, `/connect` — reads that property at
+ * call time, so assigning it before any request arrives changes the accepted
+ * token for the whole process. This is a deliberate dependency on a dsh
+ * internal: the field is verified through the public `authenticatedUrl()`
+ * afterwards, and a dsh version that moves it degrades to the stock behavior
+ * (fresh token per restart) with a warning instead of breaking sign-in.
+ *
+ * @param connection - dsh's Connection service.
+ * @param token - the persistent token to install.
+ * @param logger - logger for the compatibility warning.
+ * @returns true when the installed token is the one dsh now advertises.
+ */
+export function installLaunchToken(connection, token, logger) {
+  const auth = connection?.browserAuth
+  if (auth === undefined || typeof auth.launchToken !== 'string') {
+    logger?.warn('dsh-gateway: this dsh version exposes no browserAuth.launchToken; the sign-in token rotates on every restart')
+    return false
+  }
+  auth.launchToken = token
+  try {
+    const advertised = new URL(connection.authenticatedUrl('http://127.0.0.1/')).searchParams.get('token')
+    if (advertised === token) return true
+  } catch {
+    // Fall through to the warning.
+  }
+  logger?.warn('dsh-gateway: installing the persistent launch token did not take effect; the sign-in token rotates on every restart')
+  return false
+}
+
 class DshGateway extends Service {
   static Config = Config
 
@@ -103,6 +139,12 @@ class DshGateway extends Service {
     super(ctx, 'gateway')
     this.config = config
     this.settings = new GatewaySettingsStore(join(config.dataDir, 'settings.json'))
+    this.launchToken = new LaunchTokenStore(
+      join(config.dataDir, 'token.txt'),
+      envValue(TOKEN_ENV),
+      ctx.logger
+    )
+    this.persistentToken = false
     this.envOverrides = {
       pwa: envBoolOverride(PWA_ENV),
       hostMode: envBoolOverride(HOST_MODE_ENV)
@@ -118,7 +160,7 @@ class DshGateway extends Service {
   }
 
   async [Service.init]() {
-    await this.settings.init()
+    await Promise.all([this.settings.init(), this.launchToken.init()])
 
     const saved = this.settings.snapshot()
     this.runtimePwa = this.envOverrides.pwa ?? saved.pwa ?? this.config.pwa
@@ -193,7 +235,12 @@ class DshGateway extends Service {
     // Connection mounts after this row in the shipped web composition, so the
     // launch token only exists once that service appears. Waiving readiness is
     // safe: this is a log line, not part of serving traffic.
-    this.ctx.inject(['connection'], () => {
+    this.ctx.inject(['connection'], (connCtx) => {
+      this.persistentToken = installLaunchToken(
+        connCtx.get('connection'),
+        this.launchToken.token,
+        this.ctx.logger
+      )
       this.printSignInUrl(target)
     })
   }
@@ -286,7 +333,9 @@ class DshGateway extends Service {
         provider: 'dsh',
         // dsh's cookie name is a deterministic hash of the authority it was
         // minted for; the gateway always forwards the loopback authority.
-        cookieName: dshCookieName(targetAuthority(this.target))
+        cookieName: dshCookieName(targetAuthority(this.target)),
+        persistentToken: this.persistentToken,
+        tokenSource: this.persistentToken ? this.launchToken.source : 'process'
       },
       pwa: {
         value: this.runtimePwa,
@@ -438,11 +487,12 @@ class DshGateway extends Service {
   /**
    * Print the one URL that signs a browser in.
    *
-   * The gateway owns no credential: authentication is dsh's launch token,
-   * exchanged for dsh's own signed cookie. dsh only accepts that token on
-   * `GET /`, and the exchange works through this proxy because the gateway
-   * forwards `Host` as the loopback authority dsh binds the cookie to. Rewriting
-   * dsh's URL to the gateway port is therefore all that is needed.
+   * Authentication is dsh's launch token exchanged for dsh's own signed
+   * cookie. dsh only accepts that token on `GET /`, and the exchange works
+   * through this proxy because the gateway forwards `Host` as the loopback
+   * authority dsh binds the cookie to. Rewriting dsh's URL to the gateway port
+   * is therefore all that is needed. With the persistent token installed the
+   * URL is stable across restarts and safe to bookmark.
    */
   printSignInUrl(target) {
     const tokenized = this.tokenizedUrl(targetAuthority(target))
@@ -453,7 +503,8 @@ class DshGateway extends Service {
     }
     const host = this.config.host === '0.0.0.0' ? '127.0.0.1' : this.config.host
     const urlHost = host.includes(':') ? `[${host}]` : host
-    console.log(`dsh-gateway: sign in with http://${urlHost}:${String(this.proxyPort)}/?token=${encodeURIComponent(token)}`)
+    const stability = this.persistentToken ? ' (stable across restarts)' : ''
+    console.log(`dsh-gateway: sign in with http://${urlHost}:${String(this.proxyPort)}/?token=${encodeURIComponent(token)}${stability}`)
   }
 
   async close() {

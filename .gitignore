@@ -5,6 +5,7 @@ node_modules/
 auth.json
 session.json
 settings.json
+token.txt
 
 # dsh writes this profile-root file into any directory it boots as a profile;
 # this repo may double as the dsh profile data directory, so it appears here.

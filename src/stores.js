@@ -14,22 +14,25 @@ export async function atomicWrite(file, data) {
 
 /**
  * Create the data directory and a `.gitignore` that keeps the gateway's local
- * settings file out of git. The profile directory itself may be a git checkout
- * or sit beside one; ignore entries are added only when the file does not
- * already exist.
+ * settings and credential files out of git. The profile directory itself may be
+ * a git checkout or sit beside one. Entries are merged into an existing file so
+ * an upgrade adds `token.txt` to a `.gitignore` written by an older version.
  */
 export async function ensureDataDir(dir) {
   await mkdir(dir, { recursive: true })
   const gitignore = join(dir, '.gitignore')
+  const required = ['settings.json', 'token.txt']
+  let existing = ''
   try {
-    await readFile(gitignore, 'utf8')
+    existing = await readFile(gitignore, 'utf8')
   } catch (err) {
-    if (err?.code === 'ENOENT') {
-      await writeFile(gitignore, 'settings.json\n', 'utf8')
-      return
-    }
-    throw err
+    if (err?.code !== 'ENOENT') throw err
   }
+  const lines = existing.split('\n').map((line) => line.trim())
+  const missing = required.filter((entry) => !lines.includes(entry))
+  if (missing.length === 0) return
+  const prefix = existing === '' || existing.endsWith('\n') ? existing : `${existing}\n`
+  await writeFile(gitignore, `${prefix}${missing.join('\n')}\n`, 'utf8')
 }
 
 export async function readJsonFile(file) {

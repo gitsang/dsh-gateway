@@ -46,6 +46,11 @@ window.__ModuleLoader__.load({
       access: '访问控制',
       authProvider: '认证方式',
       authProviderValue: 'dsh launch token',
+      tokenLife: '登录 Token',
+      tokenPersistent: '长期有效（重启不变）',
+      tokenProcess: '每次重启更换',
+      tokenSourceEnv: '环境变量指定',
+      tokenSourceFile: '已持久化到数据目录',
       cookieName: '会话 Cookie',
       signOut: '退出登录',
       signOutDesc: '清除本浏览器持有的 dsh 会话 Cookie。dsh 没有登出接口，撤销全部会话需要删除凭据记录并重启 dsh。',
@@ -95,6 +100,11 @@ window.__ModuleLoader__.load({
       access: 'Access control',
       authProvider: 'Authentication',
       authProviderValue: 'dsh launch token',
+      tokenLife: 'Sign-in token',
+      tokenPersistent: 'Persistent (survives restarts)',
+      tokenProcess: 'Rotates on every restart',
+      tokenSourceEnv: 'Set by environment',
+      tokenSourceFile: 'Persisted in the data directory',
       cookieName: 'Session cookie',
       signOut: 'Sign out',
       signOutDesc: 'Clears the dsh session cookie this browser holds. dsh has no logout endpoint; revoking every session means deleting its credential record and restarting dsh.',
@@ -395,6 +405,12 @@ window.__ModuleLoader__.load({
           React.createElement('h3', { className: 'dshGatewayHeading' }, t('access')),
           React.createElement('dl', { className: 'dshGatewayRows' },
             React.createElement(StatusFact, { label: t('authProvider'), value: t('authProviderValue') }),
+            React.createElement(StatusFact, {
+              label: t('tokenLife'),
+              value: state.auth.persistentToken
+                ? `${t('tokenPersistent')}${state.auth.tokenSource === 'env' ? ` · ${t('tokenSourceEnv')}` : ` · ${t('tokenSourceFile')}`}`
+                : t('tokenProcess')
+            }),
             React.createElement(StatusFact, { label: t('cookieName'), value: state.auth.cookieName })
           ),
           React.createElement('div', { className: 'dshGatewayField' },

@@ -72,7 +72,7 @@ installs a **persistent token** instead, so the sign-in URL above never changes
 and can be bookmarked or stored in a password manager:
 
 - By default the gateway generates one random 256-bit token on first run and
-  persists it to `~/.dsh/profiles/gateway/token.txt` (owner-only permissions,
+  persists it to `~/.dsh/gateway/token.txt` (owner-only permissions,
   git-ignored).
 - `DSH_GATEWAY_TOKEN` overrides it with a token you choose (at least 22
   base64url characters, `[A-Za-z0-9_-]`). The env value is never written to
@@ -141,8 +141,17 @@ Revoking *every* session is dsh's own operation, not the gateway's:
   references the SVG icon only. This makes the gateway origin installable as a
   standalone web app on `localhost`/HTTPS.
 
-On first run the gateway creates a `~/.dsh/profiles/gateway/.gitignore` keeping
+On first run the gateway creates a `~/.dsh/gateway/.gitignore` keeping
 `settings.json` and `token.txt` out of git.
+
+The data directory is **`~/.dsh/gateway`**, beside `profiles/` — not inside it.
+`profiles/` is reserved for bootable dsh profiles: anything placed there can be
+booted as one, and dsh writes profile scaffolding into it. Gateway state is
+home-level plugin state, like dsh's `bridge/` or `.credentials.yaml`. Versions
+before 0.5 used `~/.dsh/profiles/gateway`; on the first boot after upgrading,
+the gateway copies `token.txt` and `settings.json` forward automatically (the
+old copies are left in place and can be deleted — if that directory was also
+booted as a real `gateway` profile, remove the profile itself separately).
 
 ## Gateway configuration page
 
@@ -222,7 +231,7 @@ All configuration is optional and read from environment variables at boot.
 | ----------------------- | ------------------------- | ----------------------------------------------------- |
 | `DSH_GATEWAY_HOST`      | `127.0.0.1`               | Gateway bind host                                     |
 | `DSH_GATEWAY_PORT`      | `dsh web port + 1`        | Gateway listen port (overrides the default)           |
-| `DSH_GATEWAY_DATA_DIR`  | `~/.dsh/profiles/gateway` | Directory for gateway settings                        |
+| `DSH_GATEWAY_DATA_DIR`  | `~/.dsh/gateway`        | Directory for gateway settings and token              |
 | `DSH_GATEWAY_PWA`       | `1`                       | Serve PWA assets and inject PWA tags into HTML        |
 | `DSH_GATEWAY_HOST_MODE` | `1`                       | Declare the page a host-owning page (Host settings)   |
 | `DSH_GATEWAY_TOKEN`     | generated, persisted      | Fixed sign-in token (≥22 base64url chars); see above  |

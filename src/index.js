@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
+import { copyFile, mkdir, stat } from 'node:fs/promises'
 import { networkInterfaces, homedir } from 'node:os'
 import { join } from 'node:path'
 import { Service } from '@deepseek-ai/cordis'
@@ -62,11 +63,57 @@ function envBoolOverride(names) {
   return raw === undefined ? undefined : parseBool(raw)
 }
 
+/**
+ * The gateway's data directory: `$DSH_HOME/gateway` unless overridden.
+ *
+ * This is plugin state, not a dsh profile. `profiles/` is reserved for
+ * bootable profiles — anything placed there can be booted (`dsh gateway`),
+ * and dsh writes profile scaffolding (cordis.yml, package.json) into it. The
+ * gateway's own files therefore live beside `profiles/`, like dsh's other
+ * home-level state (`bridge/`, `daemon/`, `.credentials.yaml`).
+ */
 function defaultDataDir() {
   const explicit = envValue(DATA_DIR_ENV)
   if (explicit !== undefined) return explicit
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
-  return join(dshHome, 'profiles', 'gateway')
+  return join(dshHome, 'gateway')
+}
+
+/**
+ * Copy state forward from the pre-0.5 location (`$DSH_HOME/profiles/gateway`).
+ *
+ * Only the default location migrates, and only files the new directory does
+ * not already have: an explicit DSH_GATEWAY_DATA_DIR or an existing new-style
+ * file always wins. The old files are left in place — that directory may
+ * double as a real dsh profile, so the gateway must not delete from it.
+ *
+ * @param dataDir - resolved data directory.
+ * @param logger - logger for the one-time migration notice.
+ */
+export async function migrateLegacyDataDir(dataDir, logger) {
+  if (envValue(DATA_DIR_ENV) !== undefined) return
+  const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
+  if (dataDir !== join(dshHome, 'gateway')) return
+  const legacy = join(dshHome, 'profiles', 'gateway')
+  const migrated = []
+  for (const name of ['token.txt', 'settings.json']) {
+    try {
+      await stat(join(dataDir, name))
+      continue // The new location already owns this file.
+    } catch {
+      // Not present yet; try the legacy copy.
+    }
+    try {
+      await mkdir(dataDir, { recursive: true })
+      await copyFile(join(legacy, name), join(dataDir, name))
+      migrated.push(name)
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err
+    }
+  }
+  if (migrated.length > 0) {
+    logger?.info(`dsh-gateway: moved ${migrated.join(', ')} from ${legacy} to ${dataDir}; the old copies are unused and can be deleted`)
+  }
 }
 
 export const Config = z.object({
@@ -160,6 +207,7 @@ class DshGateway extends Service {
   }
 
   async [Service.init]() {
+    await migrateLegacyDataDir(this.config.dataDir, this.ctx.logger)
     await Promise.all([this.settings.init(), this.launchToken.init()])
 
     const saved = this.settings.snapshot()

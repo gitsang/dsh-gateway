@@ -1,11 +1,15 @@
+import { access, mkdir, rename } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { atomicWrite, ensureDataDir, readJsonFile } from './stores.js'
+import { atomicWrite, readJsonFile } from './stores.js'
 
 /** Toggles owned by the gateway settings page. */
 export const GATEWAY_SETTING_KEYS = ['pwa', 'hostMode']
 
 /**
- * User-facing gateway preferences, kept separate from auth.json/session.json.
+ * User-facing gateway preferences: profile-scoped configuration stored at
+ * `<profile dir>/gateway/settings.json`, so the file travels with the
+ * profile's config repository. Credentials (`token.txt`) are a different
+ * scope and stay in the home-level data directory, git-ignored.
  *
  * These deliberately do not live in dsh's own settings store: turning Host
  * mode off removes the browser's Host-settings transport, and this page must
@@ -13,18 +17,50 @@ export const GATEWAY_SETTING_KEYS = ['pwa', 'hostMode']
  * the only bootstrap-safe place for the switch.
  */
 export class GatewaySettingsStore {
-  constructor(file) {
+  /**
+   * @param file - current settings path (`<profile dir>/gateway/settings.json`).
+   * @param legacyFiles - pre-0.5.0 locations, newest first; adopted on init.
+   */
+  constructor(file, legacyFiles = []) {
     this.file = file
+    this.legacyFiles = legacyFiles.filter((candidate) => candidate !== file)
     this.values = {}
     this.writeQueue = Promise.resolve()
   }
 
   async init() {
-    await ensureDataDir(dirname(this.file))
+    await mkdir(dirname(this.file), { recursive: true })
+    await this.adoptLegacyFile()
     const data = await readJsonFile(this.file)
     this.values = {}
     for (const key of GATEWAY_SETTING_KEYS) {
       if (typeof data?.[key] === 'boolean') this.values[key] = data[key]
+    }
+  }
+
+  /**
+   * Move a pre-0.5.0 settings file to the profile-scoped location once. The
+   * current file always wins; a failed move is non-fatal because the legacy
+   * copy stays readable and the next init retries.
+   */
+  async adoptLegacyFile() {
+    const exists = async (file) => {
+      try {
+        await access(file)
+        return true
+      } catch {
+        return false
+      }
+    }
+    if (await exists(this.file)) return
+    for (const legacy of this.legacyFiles) {
+      if (!(await exists(legacy))) continue
+      try {
+        await rename(legacy, this.file)
+      } catch {
+        // Leave the legacy copy in place; values below still fall back to it.
+      }
+      return
     }
   }
 

@@ -80,12 +80,13 @@ function defaultDataDir() {
 }
 
 /**
- * Copy state forward from the pre-0.5 location (`$DSH_HOME/profiles/gateway`).
+ * Copy the token forward from the pre-0.5 location (`$DSH_HOME/profiles/gateway`).
  *
  * Only the default location migrates, and only files the new directory does
  * not already have: an explicit DSH_GATEWAY_DATA_DIR or an existing new-style
  * file always wins. The old files are left in place — that directory may
  * double as a real dsh profile, so the gateway must not delete from it.
+ * Settings migrate separately, into the profile directory (GatewaySettingsStore).
  *
  * @param dataDir - resolved data directory.
  * @param logger - logger for the one-time migration notice.
@@ -96,7 +97,7 @@ export async function migrateLegacyDataDir(dataDir, logger) {
   if (dataDir !== join(dshHome, 'gateway')) return
   const legacy = join(dshHome, 'profiles', 'gateway')
   const migrated = []
-  for (const name of ['token.txt', 'settings.json']) {
+  for (const name of ['token.txt']) {
     try {
       await stat(join(dataDir, name))
       continue // The new location already owns this file.
@@ -185,7 +186,19 @@ class DshGateway extends Service {
   constructor(ctx, config) {
     super(ctx, 'gateway')
     this.config = config
-    this.settings = new GatewaySettingsStore(join(config.dataDir, 'settings.json'))
+    // Settings are profile-scoped configuration: they live inside the profile
+    // directory so a dotfiles checkout carries them. The token is a credential
+    // and stays in the home-level data directory. Pre-0.5.0 settings locations
+    // are adopted on first init; the current file always wins.
+    const profileDir = ctx.get('profileContext')?.dir
+    const settingsFile = profileDir !== undefined
+      ? join(profileDir, 'gateway', 'settings.json')
+      : join(config.dataDir, 'settings.json')
+    const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
+    this.settings = new GatewaySettingsStore(settingsFile, [
+      join(config.dataDir, 'settings.json'),
+      join(dshHome, 'profiles', 'gateway', 'settings.json'),
+    ])
     this.launchToken = new LaunchTokenStore(
       join(config.dataDir, 'token.txt'),
       envValue(TOKEN_ENV),

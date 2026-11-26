@@ -1,3 +1,5 @@
+# yaml-language-server: $schema=../../schemas/cordis-patch.schema.json
+
 # dsh-gateway bundle patch.
 #
 # Adds one gateway row beside the dsh web server: a reverse proxy that relays

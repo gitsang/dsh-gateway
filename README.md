@@ -141,17 +141,23 @@ Revoking *every* session is dsh's own operation, not the gateway's:
   references the SVG icon only. This makes the gateway origin installable as a
   standalone web app on `localhost`/HTTPS.
 
-On first run the gateway creates a `~/.dsh/gateway/.gitignore` keeping
-`settings.json` and `token.txt` out of git.
+Gateway data is split by scope:
 
-The data directory is **`~/.dsh/gateway`**, beside `profiles/` — not inside it.
-`profiles/` is reserved for bootable dsh profiles: anything placed there can be
-booted as one, and dsh writes profile scaffolding into it. Gateway state is
-home-level plugin state, like dsh's `bridge/` or `.credentials.yaml`. Versions
-before 0.5 used `~/.dsh/profiles/gateway`; on the first boot after upgrading,
-the gateway copies `token.txt` and `settings.json` forward automatically (the
-old copies are left in place and can be deleted — if that directory was also
-booted as a real `gateway` profile, remove the profile itself separately).
+- **`token.txt`** (credential) lives in the home-level data directory
+  **`~/.dsh/gateway`**, beside `profiles/` — not inside it. `profiles/` is
+  reserved for bootable dsh profiles. On first run the gateway creates a
+  `~/.dsh/gateway/.gitignore` keeping the token out of git.
+- **`settings.json`** (the PWA / Host-mode toggles) is profile-scoped
+  configuration and lives at **`<profile dir>/gateway/settings.json`**
+  (e.g. `~/.dsh/profiles/web/gateway/settings.json`), so a dotfiles-style
+  config repository can track it and carry it to another machine.
+
+Versions before 0.5 kept both files in `~/.dsh/profiles/gateway`. On the first
+boot after upgrading, the token is copied to `~/.dsh/gateway/` and the settings
+file is moved into the running profile's `gateway/` directory automatically
+(the current file always wins; stale copies are left in place and can be
+deleted — if that directory was also booted as a real `gateway` profile,
+remove the profile itself separately).
 
 ## Gateway configuration page
 
@@ -179,9 +185,10 @@ The page contains:
 Saving the form stages both switches and writes on **Save**. PWA changes take
 effect on the next page request. Host mode requires a restart of `dsh web`,
 because dsh's index injection is composed during boot. Settings saved on this
-page live in `settings.json`; they deliberately do not use dsh's own settings
-store, because turning Host mode off removes the browser's Host-settings
-transport and the gateway page must still be able to turn it back on.
+page live in `<profile dir>/gateway/settings.json`; they deliberately do not
+use dsh's own settings store, because turning Host mode off removes the
+browser's Host-settings transport and the gateway page must still be able to
+turn it back on.
 
 Environment variables win over the configuration page. When a toggle is managed
 by an environment variable, the page shows it as read-only.

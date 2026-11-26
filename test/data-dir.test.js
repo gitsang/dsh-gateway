@@ -21,7 +21,7 @@ async function withHome(home, fn) {
   }
 }
 
-test('migrateLegacyDataDir copies token and settings out of profiles/', async (t) => {
+test('migrateLegacyDataDir copies only the token out of profiles/', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-gateway-home-'))
   t.after(() => rm(home, { recursive: true, force: true }))
   const legacy = join(home, 'profiles', 'gateway')
@@ -36,7 +36,8 @@ test('migrateLegacyDataDir copies token and settings out of profiles/', async (t
   await withHome(home, () => migrateLegacyDataDir(next, { info: (m) => notices.push(m) }))
 
   assert.equal((await readFile(join(next, 'token.txt'), 'utf8')).trim(), 'legacy-token-0123456789abcdef')
-  assert.equal(await readFile(join(next, 'settings.json'), 'utf8'), '{"pwa":false}')
+  // Settings migrate into the profile directory via GatewaySettingsStore, not here.
+  await assert.rejects(() => readFile(join(next, 'settings.json'), 'utf8'), { code: 'ENOENT' })
   await assert.rejects(() => readFile(join(next, 'cordis.yml'), 'utf8'), { code: 'ENOENT' })
   // Old copies are left in place: the legacy dir may be a real profile.
   assert.equal((await readFile(join(legacy, 'token.txt'), 'utf8')).trim(), 'legacy-token-0123456789abcdef')
